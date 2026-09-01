@@ -1,0 +1,38 @@
+services:
+  business:
+    build: .
+    environment:
+      APP_ENV: development
+      PORT: "8002"
+      LOG_FORMAT: text
+      DATABASE_DRIVER: postgres
+      DATABASE_URL: postgres://vue_h5:vue_h5_local@postgres:5432/vue_h5_business?sslmode=disable
+      JWT_SECRET: local-compose-secret-change-in-production
+      JWT_ISSUER: vue-h5-template
+      JWT_AUDIENCE: vue-h5-template-api
+      CORS_ORIGINS: http://localhost:5173
+      RATE_LIMIT_ENABLED: "true"
+    ports:
+      - "8002:8002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: vue_h5_business
+      POSTGRES_USER: vue_h5
+      POSTGRES_PASSWORD: vue_h5_local
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - business-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vue_h5 -d vue_h5_business"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  business-postgres-data:

@@ -1,0 +1,25 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+bin/
+coverage.out
+*.test
+
+# Local data (SQLite demos/tests)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Documentation (VitePress)
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/
