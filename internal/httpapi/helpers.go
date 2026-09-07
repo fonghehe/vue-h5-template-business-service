@@ -39,6 +39,18 @@ func positiveInt(value string, fallback int) int {
 	return parsed
 }
 
+func optionalNonNegativeInt64(value string) (*int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return nil, errors.New("invalid non-negative integer")
+	}
+	return &parsed, nil
+}
+
 // serviceUnavailable reports a dependency outage. The underlying reason is
 // logged by the caller but never exposed to the client.
 func serviceUnavailable(cause error) error {

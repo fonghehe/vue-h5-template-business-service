@@ -1,20 +1,18 @@
 # Quick start
 
-Get the business service running locally in under a minute, either with Docker Compose (recommended) or by
-running the Go binary directly against a local PostgreSQL.
+Run the Go business API. This repository does not contain the H5 UI; its VitePress site is a separate Node project in `docs/`.
 
 ## Prerequisites
 
-- **Docker** and **Docker Compose** — for the containerised path; or
-- **Go 1.25+** and **PostgreSQL 16+** — for the bare-metal path.
+- **Docker with Compose** for the complete local stack; or Go 1.25+ and a running PostgreSQL for native development.
+- **Node.js 22+ and pnpm 11** only when building or editing VitePress documentation.
 
 ## Option A — Docker Compose
 
-This starts the service together with a PostgreSQL 17 instance, runs the migration and seeds the demo data.
+The checked-in Compose file starts the API, PostgreSQL 17 and Redis 8. Development defaults apply migrations and seed demo users, products, SKUs and coupons. Compose sets the service environment explicitly; copying `.env.example` does **not** configure its JWT, database URL or Redis URL.
 
 ```bash
-cp .env.example .env
-docker compose up --build
+docker compose up -d --build
 ```
 
 The API listens on `http://localhost:8002`. Verify it:
@@ -24,18 +22,21 @@ curl http://localhost:8002/health
 # {"code":0,"message":"ok","data":{"service":"business","status":"ok","env":"development","time":"..."},"error":null,"requestId":"..."}
 
 curl http://localhost:8002/api/product/list
+docker compose ps
 ```
 
 ## Option B — run from source
 
 ```bash
-cp .env.example .env
-# Point DATABASE_URL at your local PostgreSQL, then:
-make run
+# Start only PostgreSQL; this host port avoids an existing local 5432 server.
+POSTGRES_PORT=5433 docker compose up -d postgres
+export DATABASE_URL='postgres://vue_h5:vue_h5_local@127.0.0.1:5433/vue_h5_business?sslmode=disable'
+go run ./cmd/server
 ```
 
-`make run` executes `go run ./cmd/server`. Configuration is read from the environment; the values in `.env`
-are documented in the [configuration reference](/configuration).
+`make run` invokes the same Go command. Do not start the Compose `business` service at the same time: it also binds host port 8002. The Go process does **not** load `.env`; export variables in your shell or use an env-file tool. `.env.example` contains the development credentials for port 5432; change its port when using the command above. Redis is optional for a native API run (`REDIS_URL` defaults to empty). If the default Go module proxy times out, run `GOPROXY=https://goproxy.cn go mod download` before starting; keep the repository's `go.sum` verification enabled. See [Configuration](/configuration).
+
+Running `go run ./cmd/server` without `DATABASE_URL` targets the default `localhost:5432`, which may be a different application's database. Do **not** migrate or delete its tables to make this service start. Use the dedicated Compose database and exported URL above. Startup now rejects incompatible `users`/`products` schemas before applying migrations.
 
 ## Try the API
 
@@ -58,7 +59,7 @@ curl -s http://localhost:8002/api/product/favorite \
   -d '{"productId":1,"favorite":true}'
 ```
 
-Interactive, non-streaming endpoints are documented in the [API reference](/api).
+For a cart-to-order walkthrough, see [Commerce flow](/commerce). Endpoint details are in [API reference](/api).
 
 ## Development loop
 
@@ -66,6 +67,12 @@ Interactive, non-streaming endpoints are documented in the [API reference](/api)
 make check     # format + vet + test
 make test-race # race detector + coverage
 make lint      # golangci-lint
+make build     # binary in bin/server
+
+cd docs
+pnpm install --frozen-lockfile
+pnpm docs:dev
+pnpm docs:build
 ```
 
 ## Next steps
@@ -73,3 +80,4 @@ make lint      # golangci-lint
 - [Configuration reference](/configuration) — every environment variable.
 - [Architecture](/architecture) — how the layers fit together.
 - [Deployment](/deployment) — shipping to production.
+- [Extend the service](/development) — add an endpoint, model and tests.

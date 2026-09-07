@@ -8,12 +8,38 @@
 package response
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/fonghehe/vue-h5-template-business-service/internal/apierr"
 )
+
+type requestContextKey string
+
+const (
+	requestIDContextKey requestContextKey = "request-id"
+	userIDContextKey    requestContextKey = "user-id"
+)
+
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDContextKey, requestID)
+}
+
+func RequestIDFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(requestIDContextKey).(string)
+	return value
+}
+
+func WithUserID(ctx context.Context, userID uint) context.Context {
+	return context.WithValue(ctx, userIDContextKey, userID)
+}
+
+func UserIDFromContext(ctx context.Context) uint {
+	value, _ := ctx.Value(userIDContextKey).(uint)
+	return value
+}
 
 // Context keys shared by the middleware chain and the response writer. They
 // live here (rather than in the middleware package) so that transport helpers

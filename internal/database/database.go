@@ -61,13 +61,18 @@ func Open(opts Options) (*gorm.DB, error) {
 		Logger:                                   gormlogger.Default.LogMode(logLevel(opts.Quiet)),
 		TranslateError:                           true,
 		PrepareStmt:                              false,
-		DisableForeignKeyConstraintWhenMigrating: true,
+		DisableForeignKeyConstraintWhenMigrating: false,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	if err := configurePool(db, opts); err != nil {
+		return nil, err
+	}
+	// Even when migrations are disabled, do not serve against a database owned
+	// by another application that happens to have users/products tables.
+	if err := rejectIncompatibleSchema(db); err != nil {
 		return nil, err
 	}
 	if opts.AutoMigrate {

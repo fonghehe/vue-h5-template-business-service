@@ -60,7 +60,14 @@ func (u User) Public() User {
 // Product is a catalog item. Monetary values are stored as strings so that no
 // rounding can occur between the database and the client.
 type Product struct {
-	ID          uint           `gorm:"primaryKey"                            json:"id"`
+	ID uint `gorm:"primaryKey"                            json:"id"`
+	// Name/CategoryID/Brand/Cover are the canonical commerce catalogue fields.
+	// The legacy fields below remain in the response so existing vue-h5-template
+	// clients keep working while new clients use the SKU-based contract.
+	Name        string         `gorm:"size:255;not null;default:''"          json:"name"`
+	CategoryID  string         `gorm:"size:64;index;not null;default:''"     json:"categoryId"`
+	Brand       string         `gorm:"size:120;index;not null;default:''"    json:"brand"`
+	Cover       string         `gorm:"size:500;not null;default:''"          json:"cover"`
 	Title       string         `gorm:"size:255;not null"                     json:"title"`
 	ImgURL      string         `gorm:"column:img_url;size:500;not null"      json:"imgUrl"`
 	Price       string         `gorm:"size:32;not null"                      json:"price"`
@@ -74,9 +81,10 @@ type Product struct {
 	Featured    bool           `gorm:"index;not null;default:false"          json:"-"`
 	Status      string         `gorm:"size:24;index;not null;default:draft"  json:"-"`
 	SearchText  string         `gorm:"type:text;not null"                    json:"-"`
-	CreatedAt   time.Time      `json:"-"`
-	UpdatedAt   time.Time      `json:"-"`
+	CreatedAt   time.Time      `json:"createdAt"`
+	UpdatedAt   time.Time      `json:"updatedAt"`
 	DeletedAt   gorm.DeletedAt `gorm:"index"                                 json:"-"`
+	SKUs        []ProductSKU   `gorm:"foreignKey:ProductID"                  json:"skus,omitempty"`
 }
 
 // Favorite links a user to a product they bookmarked.

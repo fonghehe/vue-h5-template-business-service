@@ -39,6 +39,7 @@ func Authenticate(service TokenVerifier) gin.HandlerFunc {
 		}
 
 		c.Set(response.ContextKeyUserID, userID)
+		c.Request = c.Request.WithContext(response.WithUserID(c.Request.Context(), userID))
 		c.Set(response.ContextKeyUsername, claims.Username)
 		c.Set(response.ContextKeyRoles, claims.Roles)
 		c.Next()

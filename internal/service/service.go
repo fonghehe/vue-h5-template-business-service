@@ -6,6 +6,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 
 	"github.com/fonghehe/vue-h5-template-business-service/internal/apierr"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/auth"
+	productcache "github.com/fonghehe/vue-h5-template-business-service/internal/cache"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/config"
+	"github.com/fonghehe/vue-h5-template-business-service/internal/metrics"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/model"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/repository"
 )
@@ -56,21 +59,28 @@ type Container struct {
 	// Products is exported so the HTTP layer can also serve operator routes.
 	Products  *ProductService
 	Favorites *FavoriteService
+	Cart      *CartService
+	Orders    *OrderService
+	Payments  *PaymentService
 }
 
 // New builds the service container.
-func New(cfg config.Config, db *gorm.DB) *Container {
+func New(cfg config.Config, db *gorm.DB, logger *slog.Logger, cache productcache.ProductCache, metricSet *metrics.Metrics) *Container {
 	users := repository.NewUserRepository(db)
 	products := repository.NewProductRepository(db)
 	favorites := repository.NewFavoriteRepository(db)
+	commerce := repository.NewCommerceRepository(db)
 	issuer := auth.New(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAudience)
 
 	return &Container{
 		Config:    cfg,
 		Auth:      NewAuthService(cfg, users, issuer),
 		Users:     NewUserService(users),
-		Products:  NewProductService(products),
+		Products:  NewProductService(products, commerce, cache, logger),
 		Favorites: NewFavoriteService(products, favorites),
+		Cart:      NewCartService(commerce),
+		Orders:    NewOrderService(cfg, commerce, logger, metricSet),
+		Payments:  NewPaymentService(commerce, NewMockPaymentProvider(cfg.MockPaymentWebhookSecret), logger, metricSet),
 	}
 }
 
@@ -198,11 +208,20 @@ func (s *UserService) ByID(ctx context.Context, id uint) (model.User, error) {
 // ProductService exposes catalog reads and writes.
 type ProductService struct {
 	products *repository.ProductRepository
+	commerce *repository.CommerceRepository
+	cache    productcache.ProductCache
+	logger   *slog.Logger
 }
 
 // NewProductService builds a product service.
-func NewProductService(products *repository.ProductRepository) *ProductService {
-	return &ProductService{products: products}
+func NewProductService(products *repository.ProductRepository, commerce *repository.CommerceRepository, cache productcache.ProductCache, logger *slog.Logger) *ProductService {
+	if cache == nil {
+		cache = productcache.NoopProductCache{}
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &ProductService{products: products, commerce: commerce, cache: cache, logger: logger}
 }
 
 // ProductQuery is the public, validated form of a list request.
@@ -215,6 +234,9 @@ type ProductQuery struct {
 	IncludeHidden bool
 	Status        string
 	Featured      *bool
+	Category      string
+	PriceMin      *int64
+	PriceMax      *int64
 }
 
 // List returns one page of the catalog.
@@ -227,6 +249,9 @@ func (s *ProductService) List(ctx context.Context, query ProductQuery) (Page[mod
 		IncludeHidden: query.IncludeHidden,
 		Status:        query.Status,
 		Featured:      query.Featured,
+		Category:      query.Category,
+		PriceMin:      query.PriceMin,
+		PriceMax:      query.PriceMax,
 	})
 	if err != nil {
 		return Page[model.Product]{}, err
@@ -236,7 +261,26 @@ func (s *ProductService) List(ctx context.Context, query ProductQuery) (Page[mod
 
 // Detail returns a product for public consumption.
 func (s *ProductService) Detail(ctx context.Context, id uint) (model.Product, error) {
-	return s.products.FindPublicByID(ctx, id)
+	product, found, err := s.cache.Get(ctx, id)
+	if err != nil {
+		s.logger.WarnContext(ctx, "product cache read failed", "productId", id, "error", err)
+	}
+	if !found || err != nil {
+		product, err = s.products.FindPublicByID(ctx, id)
+		if err != nil {
+			return model.Product{}, err
+		}
+		if err := s.cache.Set(ctx, product); err != nil {
+			s.logger.WarnContext(ctx, "product cache write failed", "productId", id, "error", err)
+		}
+	}
+	// A cache implementation may retain the passed struct in memory. Do not
+	// attach fresh inventory to the catalogue slice held by that cache.
+	product.SKUs = append([]model.ProductSKU(nil), product.SKUs...)
+	if err := s.products.AttachInventories(ctx, &product); err != nil {
+		return model.Product{}, err
+	}
+	return product, nil
 }
 
 // AdminDetail returns a product regardless of status; operator-only.
@@ -246,6 +290,10 @@ func (s *ProductService) AdminDetail(ctx context.Context, id uint) (model.Produc
 
 // ProductInput is the operator payload for creating or updating a product.
 type ProductInput struct {
+	Name        string
+	CategoryID  string
+	Brand       string
+	Cover       string
 	Title       string
 	ImgURL      string
 	Price       string
@@ -289,6 +337,9 @@ func (s *ProductService) Update(ctx context.Context, id uint, input ProductInput
 	if err := s.products.Save(ctx, &updated); err != nil {
 		return model.Product{}, err
 	}
+	if err := s.cache.Delete(ctx, id); err != nil {
+		s.logger.WarnContext(ctx, "product cache invalidation failed", "productId", id, "error", err)
+	}
 	return updated, nil
 }
 
@@ -298,11 +349,115 @@ func (s *ProductService) Delete(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	return s.products.Delete(ctx, &product)
+	if err := s.products.Delete(ctx, &product); err != nil {
+		return err
+	}
+	if err := s.cache.Delete(ctx, id); err != nil {
+		s.logger.WarnContext(ctx, "product cache invalidation failed", "productId", id, "error", err)
+	}
+	return nil
+}
+
+type ProductSKUInput struct {
+	SKUCode       string
+	Name          string
+	Attributes    model.SKUAttributes
+	Price         int64
+	OriginalPrice int64
+	Status        string
+	Available     int64
+}
+
+func (s *ProductService) CreateSKU(ctx context.Context, productID uint, input ProductSKUInput) (model.ProductSKU, error) {
+	if _, err := s.products.FindByID(ctx, productID); err != nil {
+		return model.ProductSKU{}, err
+	}
+	sku := model.ProductSKU{
+		ProductID: productID, SKUCode: strings.TrimSpace(input.SKUCode), Name: strings.TrimSpace(input.Name),
+		Attributes: input.Attributes, Price: input.Price, OriginalPrice: input.OriginalPrice, Status: input.Status,
+	}
+	if sku.Attributes == nil {
+		sku.Attributes = model.SKUAttributes{}
+	}
+	if err := validateSKU(sku, input.Available); err != nil {
+		return model.ProductSKU{}, err
+	}
+	if err := s.commerce.CreateSKUWithInventory(ctx, &sku, input.Available); err != nil {
+		return model.ProductSKU{}, err
+	}
+	if err := s.cache.Delete(ctx, productID); err != nil {
+		s.logger.WarnContext(ctx, "product cache invalidation failed", "productId", productID, "error", err)
+	}
+	return s.commerce.FindSKU(ctx, sku.ID)
+}
+
+func (s *ProductService) UpdateSKU(ctx context.Context, skuID uint, input ProductSKUInput) (model.ProductSKU, error) {
+	existing, err := s.commerce.FindSKU(ctx, skuID)
+	if err != nil {
+		return model.ProductSKU{}, err
+	}
+	updated := existing
+	updated.SKUCode = strings.TrimSpace(input.SKUCode)
+	updated.Name = strings.TrimSpace(input.Name)
+	updated.Attributes = input.Attributes
+	updated.Price = input.Price
+	updated.OriginalPrice = input.OriginalPrice
+	updated.Status = input.Status
+	if updated.Attributes == nil {
+		updated.Attributes = model.SKUAttributes{}
+	}
+	if err := validateSKU(updated, 0); err != nil {
+		return model.ProductSKU{}, err
+	}
+	if err := s.commerce.SaveSKU(ctx, &updated); err != nil {
+		return model.ProductSKU{}, err
+	}
+	if err := s.cache.Delete(ctx, updated.ProductID); err != nil {
+		s.logger.WarnContext(ctx, "product cache invalidation failed", "productId", updated.ProductID, "error", err)
+	}
+	return s.commerce.FindSKU(ctx, updated.ID)
+}
+
+func validateSKU(sku model.ProductSKU, available int64) error {
+	switch {
+	case sku.SKUCode == "":
+		return apierr.Validation("skuCode is required")
+	case sku.Name == "":
+		return apierr.Validation("SKU name is required")
+	case sku.Price < 0 || sku.OriginalPrice < 0:
+		return apierr.Validation("SKU prices must be non-negative integer cents")
+	case sku.OriginalPrice > 0 && sku.Price > sku.OriginalPrice:
+		return apierr.Validation("price must not exceed originalPrice")
+	case sku.Status != model.SKUStatusActive && sku.Status != model.SKUStatusInactive:
+		return apierr.Validation("SKU status must be active or inactive")
+	case available < 0:
+		return apierr.Validation("available inventory must be non-negative")
+	}
+	if len(sku.Attributes) > 20 {
+		return apierr.Validation("SKU attributes must not contain more than 20 entries")
+	}
+	for key, value := range sku.Attributes {
+		if strings.TrimSpace(key) == "" || len(key) > 64 || len(value) > 120 {
+			return apierr.Validation("SKU attribute keys and values are invalid")
+		}
+	}
+	return nil
 }
 
 func productFromInput(input ProductInput) model.Product {
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = strings.TrimSpace(input.Title)
+	}
+	cover := strings.TrimSpace(input.Cover)
+	if cover == "" {
+		cover = strings.TrimSpace(input.ImgURL)
+	}
 	return model.Product{
+		Name:        name,
+		CategoryID:  strings.TrimSpace(input.CategoryID),
+		Brand:       strings.TrimSpace(input.Brand),
+		Cover:       cover,
 		Title:       strings.TrimSpace(input.Title),
 		ImgURL:      strings.TrimSpace(input.ImgURL),
 		Price:       strings.TrimSpace(input.Price),
@@ -323,6 +478,8 @@ func validateProduct(product model.Product) error {
 	switch {
 	case product.Title == "":
 		return apierr.Validation("title is required")
+	case product.Name == "":
+		return apierr.Validation("name is required")
 	case product.ImgURL == "":
 		return apierr.Validation("imgUrl is required")
 	case !isNumeric(product.Price):
@@ -368,7 +525,7 @@ func isNumeric(value string) bool {
 }
 
 func searchText(product model.Product) string {
-	return strings.Join([]string{product.Title, product.ShopName, product.ShopDesc, product.Description}, " ")
+	return strings.Join([]string{product.Name, product.Title, product.Brand, product.CategoryID, product.ShopName, product.ShopDesc, product.Description}, " ")
 }
 
 // FavoriteService manages the many-to-many bookmark relation.

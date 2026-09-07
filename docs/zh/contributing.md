@@ -8,10 +8,9 @@
 ```bash
 git clone https://github.com/fonghehe/vue-h5-template-business-service.git
 cd vue-h5-template-business-service
-cp .env.example .env
 ```
 
-需要 Go 1.25+。涉及 PostgreSQL 的测试在 CI 的 service 容器上运行；多数单元测试使用内存 SQLite 数据库，
+需要 Go 1.25+。涉及 PostgreSQL 的测试在 CI 的 service 容器上运行；多数单元测试使用临时 SQLite 数据库文件，
 无需外部服务。
 
 ## 开发命令
@@ -25,6 +24,8 @@ make build     # 编译二进制到 bin/
 
 ## 代码风格
 
+新增 Go 接口、持久化模型、事务与测试时，按[扩展服务](/zh/development)的真实代码路径操作；只复制 `.env.example` 不会为 Go 进程导出环境变量，启动步骤见[快速开始](/zh/quickstart)。
+
 - 格式化由 `gofmt` 强制，CI 会对未格式化代码报错。
 - 静态分析运行 `go vet` 与 `golangci-lint`（配置见 `.golangci.yml`）。
 - 分层架构是刻意设计 —— 业务规则属于 `internal/service`，绝不能放进 handler。
@@ -35,6 +36,8 @@ make build     # 编译二进制到 bin/
 而不是复用旧码。
 
 ## Pull Request 检查清单
+
+公共 API 变化要同步 `/`、`/zh/`、`/ja/` 三套文档与前端仓库的 OpenAPI 契约。
 
 1. 为改动新增或更新测试。
 2. 本地运行 `make check` 并保持全绿。

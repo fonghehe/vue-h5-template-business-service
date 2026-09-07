@@ -1,5 +1,5 @@
 // Package config loads and validates the service configuration from the
-// environment (optionally seeded from a .env file).
+// process environment. It does not read .env files automatically.
 //
 // Configuration is fail-fast: an invalid value aborts startup rather than
 // silently falling back to a default, because a misconfigured service that
@@ -18,6 +18,11 @@ import (
 // it in a non-development environment.
 // #nosec G101 -- development-only placeholder, rejected at startup outside development.
 const DefaultJWTSecret = "dev-only-change-me-before-production"
+
+// DefaultMockPaymentWebhookSecret signs local mock-provider callbacks. Like
+// the JWT placeholder it is rejected in production.
+// #nosec G101 -- development-only placeholder, rejected at startup in production.
+const DefaultMockPaymentWebhookSecret = "dev-mock-payment-webhook-secret-change-me"
 
 // Valid APP_ENV values.
 const (
@@ -78,6 +83,22 @@ type Config struct {
 	// RateLimitBurst is the bucket capacity per IP.
 	RateLimitBurst int
 
+	// OrderPaymentTTL is how long inventory and coupons remain reserved while
+	// an order waits for payment.
+	OrderPaymentTTL time.Duration
+	// OrderExpirationInterval controls the background worker cadence.
+	OrderExpirationInterval time.Duration
+	// OrderExpirationBatchSize bounds each SKIP LOCKED transaction.
+	OrderExpirationBatchSize int
+
+	// MockPaymentWebhookSecret authenticates callbacks from the mock provider.
+	MockPaymentWebhookSecret string
+
+	// RedisURL enables the optional product-detail cache. An empty value
+	// disables caching; PostgreSQL remains authoritative in either mode.
+	RedisURL        string
+	ProductCacheTTL time.Duration
+
 	// ShutdownTimeout bounds graceful shutdown.
 	ShutdownTimeout time.Duration
 	// ReadTimeout / WriteTimeout / IdleTimeout bound the HTTP server.
@@ -101,7 +122,7 @@ func Load() Config {
 		DBMaxIdleConns:    envInt("DB_MAX_IDLE_CONNS", 5),
 		DBConnMaxLifetime: envDuration("DB_CONN_MAX_LIFETIME", 30*time.Minute),
 		AutoMigrate:       envBool("AUTO_MIGRATE", true),
-		Seed:              envBool("SEED", true),
+		Seed:              envBool("SEED", !production),
 
 		JWTSecret:           env("JWT_SECRET", DefaultJWTSecret),
 		JWTIssuer:           env("JWT_ISSUER", "vue-h5-template"),
@@ -116,6 +137,14 @@ func Load() Config {
 		RateLimitEnabled: envBool("RATE_LIMIT_ENABLED", true),
 		RateLimitRPS:     envFloat("RATE_LIMIT_RPS", 20),
 		RateLimitBurst:   envInt("RATE_LIMIT_BURST", 40),
+
+		OrderPaymentTTL:          envDuration("ORDER_PAYMENT_TTL", 15*time.Minute),
+		OrderExpirationInterval:  envDuration("ORDER_EXPIRATION_INTERVAL", 30*time.Second),
+		OrderExpirationBatchSize: envInt("ORDER_EXPIRATION_BATCH_SIZE", 100),
+		MockPaymentWebhookSecret: env("MOCK_PAYMENT_WEBHOOK_SECRET", DefaultMockPaymentWebhookSecret),
+
+		RedisURL:        strings.TrimSpace(env("REDIS_URL", "")),
+		ProductCacheTTL: envDuration("PRODUCT_CACHE_TTL", 5*time.Minute),
 
 		ShutdownTimeout: envDuration("SHUTDOWN_TIMEOUT", 15*time.Second),
 		ReadTimeout:     envDuration("READ_TIMEOUT", 15*time.Second),
@@ -149,6 +178,12 @@ func (c Config) Validate() error {
 	if c.AppEnv == EnvProduction && c.JWTSecret == DefaultJWTSecret {
 		return fmt.Errorf("JWT_SECRET must be replaced with a random value in production")
 	}
+	if len(c.MockPaymentWebhookSecret) < 32 {
+		return fmt.Errorf("MOCK_PAYMENT_WEBHOOK_SECRET must contain at least 32 characters")
+	}
+	if c.AppEnv == EnvProduction && c.MockPaymentWebhookSecret == DefaultMockPaymentWebhookSecret {
+		return fmt.Errorf("MOCK_PAYMENT_WEBHOOK_SECRET must be replaced in production")
+	}
 	if c.AccessTokenTTL <= 0 || c.RefreshTokenTTL <= 0 {
 		return fmt.Errorf("token TTLs must be positive")
 	}
@@ -158,6 +193,9 @@ func (c Config) Validate() error {
 
 	// TLS and CORS hygiene in production.
 	if c.AppEnv == EnvProduction {
+		if c.Seed {
+			return fmt.Errorf("SEED must be false in production to prevent demo credentials and coupons")
+		}
 		if !c.RefreshCookieSecure {
 			return fmt.Errorf("REFRESH_COOKIE_SECURE must be true in production")
 		}
@@ -176,6 +214,15 @@ func (c Config) Validate() error {
 	}
 	if c.RateLimitEnabled && (c.RateLimitRPS <= 0 || c.RateLimitBurst <= 0) {
 		return fmt.Errorf("RATE_LIMIT_RPS and RATE_LIMIT_BURST must be positive when rate limiting is enabled")
+	}
+	if c.OrderPaymentTTL <= 0 {
+		return fmt.Errorf("ORDER_PAYMENT_TTL must be positive")
+	}
+	if c.OrderExpirationInterval <= 0 || c.OrderExpirationBatchSize <= 0 || c.OrderExpirationBatchSize > 1000 {
+		return fmt.Errorf("order expiration interval and batch size must be positive, and batch size must not exceed 1000")
+	}
+	if c.ProductCacheTTL <= 0 {
+		return fmt.Errorf("PRODUCT_CACHE_TTL must be positive")
 	}
 	return nil
 }

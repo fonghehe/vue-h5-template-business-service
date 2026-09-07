@@ -42,6 +42,8 @@ jobs:
 
       - name: Test
         run: go test -race -coverprofile=coverage.out ./...
+        env:
+          TEST_DATABASE_URL: postgres://vue_h5:test-only@127.0.0.1:5432/vue_h5_business?sslmode=disable
 
       - name: Lint
         uses: golangci/golangci-lint-action@v9

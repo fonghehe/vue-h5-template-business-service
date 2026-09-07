@@ -34,9 +34,11 @@ func validConfig() Config {
 	cfg := Load()
 	cfg.AppEnv = EnvProduction
 	cfg.JWTSecret = strings.Repeat("s", 40)
+	cfg.MockPaymentWebhookSecret = strings.Repeat("p", 40)
 	cfg.LogFormat = "json"
 	cfg.RefreshCookieSecure = true
 	cfg.CORSOrigins = []string{"https://app.example.com"}
+	cfg.Seed = false
 	return cfg
 }
 
@@ -102,6 +104,27 @@ func TestProductionRejectsDefaultJWTSecret(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "JWT_SECRET")
+}
+
+func TestProductionRejectsDefaultPaymentWebhookSecret(t *testing.T) {
+	cfg := validConfig()
+	cfg.MockPaymentWebhookSecret = DefaultMockPaymentWebhookSecret
+
+	err := cfg.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MOCK_PAYMENT_WEBHOOK_SECRET")
+}
+
+func TestProductionNeverSeedsDemoCredentials(t *testing.T) {
+	withEnv(t, map[string]string{"APP_ENV": EnvProduction}, func() {
+		assert.False(t, Load().Seed)
+	})
+	cfg := validConfig()
+	cfg.Seed = true
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SEED")
 }
 
 func TestShortJWTSecretIsRejectedInEveryEnvironment(t *testing.T) {

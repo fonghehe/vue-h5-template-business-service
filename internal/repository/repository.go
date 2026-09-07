@@ -53,6 +53,9 @@ type ProductListQuery struct {
 	Status   string
 	Featured *bool
 	Sort     string
+	Category string
+	PriceMin *int64
+	PriceMax *int64
 }
 
 // ProductRepository persists catalog items.
@@ -75,10 +78,26 @@ func (r *ProductRepository) List(ctx context.Context, query ProductListQuery) ([
 		db = db.Where("status = ?", query.Status)
 	}
 	if keyword := strings.TrimSpace(query.Keyword); keyword != "" {
-		db = db.Where("LOWER(search_text) LIKE LOWER(?)", "%"+escapeLike(keyword)+"%")
+		db = db.Where("LOWER(search_text) LIKE LOWER(?) ESCAPE '\\'", "%"+escapeLike(keyword)+"%")
 	}
 	if query.Featured != nil {
 		db = db.Where("featured = ?", *query.Featured)
+	}
+	if query.Category != "" {
+		db = db.Where("category_id = ?", strings.TrimSpace(query.Category))
+	}
+	if query.PriceMin != nil || query.PriceMax != nil {
+		predicate := "EXISTS (SELECT 1 FROM product_skus ps WHERE ps.product_id = products.id AND ps.status = ?"
+		args := []any{model.SKUStatusActive}
+		if query.PriceMin != nil {
+			predicate += " AND ps.price >= ?"
+			args = append(args, *query.PriceMin)
+		}
+		if query.PriceMax != nil {
+			predicate += " AND ps.price <= ?"
+			args = append(args, *query.PriceMax)
+		}
+		db = db.Where(predicate+")", args...)
 	}
 
 	var total int64
@@ -97,7 +116,7 @@ func (r *ProductRepository) List(ctx context.Context, query ProductListQuery) ([
 // FindByID returns a single product, including hidden ones.
 func (r *ProductRepository) FindByID(ctx context.Context, id uint) (model.Product, error) {
 	var product model.Product
-	if err := r.db.WithContext(ctx).First(&product, id).Error; err != nil {
+	if err := r.db.WithContext(ctx).Preload("SKUs").Preload("SKUs.Inventory").First(&product, id).Error; err != nil {
 		return model.Product{}, translate(err, "product not found")
 	}
 	return product, nil
@@ -105,14 +124,36 @@ func (r *ProductRepository) FindByID(ctx context.Context, id uint) (model.Produc
 
 // FindPublicByID returns a product only when it is on sale.
 func (r *ProductRepository) FindPublicByID(ctx context.Context, id uint) (model.Product, error) {
-	product, err := r.FindByID(ctx, id)
-	if err != nil {
-		return model.Product{}, err
-	}
-	if product.Status != model.StatusOnSale {
-		return model.Product{}, apierr.NotFound("product not found")
+	var product model.Product
+	if err := r.db.WithContext(ctx).Preload("SKUs").Where("status = ?", model.StatusOnSale).First(&product, id).Error; err != nil {
+		return model.Product{}, translate(err, "product not found")
 	}
 	return product, nil
+}
+
+// AttachInventories reads stock from PostgreSQL on every detail request. The
+// catalogue can be cached, but authoritative inventory must never be cached.
+func (r *ProductRepository) AttachInventories(ctx context.Context, product *model.Product) error {
+	if len(product.SKUs) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(product.SKUs))
+	for i := range product.SKUs {
+		ids = append(ids, product.SKUs[i].ID)
+		product.SKUs[i].Inventory = nil
+	}
+	var inventories []model.Inventory
+	if err := r.db.WithContext(ctx).Where("sku_id IN ?", ids).Find(&inventories).Error; err != nil {
+		return apierr.Wrap(apierr.CodeInternal, "could not load inventory", err)
+	}
+	bySKU := make(map[uint]*model.Inventory, len(inventories))
+	for i := range inventories {
+		bySKU[inventories[i].SKUID] = &inventories[i]
+	}
+	for i := range product.SKUs {
+		product.SKUs[i].Inventory = bySKU[product.SKUs[i].ID]
+	}
+	return nil
 }
 
 // Create inserts a product.
@@ -149,9 +190,9 @@ func (r *ProductRepository) Delete(ctx context.Context, product *model.Product) 
 func orderFor(sort string) string {
 	switch sort {
 	case "price_asc":
-		return "CAST(price AS REAL) ASC, id DESC"
+		return "(SELECT MIN(ps.price) FROM product_skus ps WHERE ps.product_id = products.id AND ps.status = 'active') ASC, id DESC"
 	case "price_desc":
-		return "CAST(price AS REAL) DESC, id DESC"
+		return "(SELECT MIN(ps.price) FROM product_skus ps WHERE ps.product_id = products.id AND ps.status = 'active') DESC, id DESC"
 	case "sales":
 		return "sales DESC, id DESC"
 	case "newest":

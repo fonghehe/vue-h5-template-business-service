@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "business-service"
-  text: "The business API for vue-h5-template"
-  tagline: Authentication, user profile & favourites, and the product catalogue — built with Go, Gin and GORM on PostgreSQL.
+  text: "Commerce business API for vue-h5-template"
+  tagline: Auth, SKU inventory, cart, coupons and transactional orders in one Go service.
   actions:
     - theme: brand
       text: Quick start
@@ -17,33 +17,35 @@ hero:
       link: https://github.com/fonghehe/vue-h5-template-business-service
 
 features:
-  - title: Frontend-aligned contract
-    details: Every response is <code>{ code, message, data, error, requestId }</code> with <code>code === 0</code> meaning success, matching <code>@vh5/api-client</code> exactly.
-  - title: Layered architecture
-    details: config → model → repository → service → httpapi, with a versioned migration and a deterministic, idempotent seed.
-  - title: Production hygiene
-    details: Fail-fast config validation, per-IP rate limiting, CORS and trusted-proxy hardening, request correlation ids and structured JSON logs.
-  - title: Ops-ready
-    details: Multi-stage non-root Docker image, health/readiness probes, docker compose with PostgreSQL, and GitHub Actions CI.
+  - title: Transactional checkout
+    details: Server-priced SKUs, conditional inventory reservation, coupon limits, order snapshots and cart clearing commit together.
+  - title: Retry-safe payment state
+    details: Database-backed order and webhook idempotency, explicit state transitions, cancellation and expiration release.
+  - title: Existing H5 contract
+    details: Auth, profile, favourites and product endpoints remain available with the shared JSON envelope.
+  - title: Operable service
+    details: PostgreSQL source of truth, optional Redis catalogue cache, structured logs, Prometheus metrics and multi-instance-safe expiration worker.
 ---
 
 ## The backend pair
 
-This is one half of the vue-h5-template backend. Streaming AI workloads live in the sibling
+This is a Go HTTP service, not the H5 frontend: there are no pages, Vue components, client stores or Vite app here. Streaming AI workloads live in the sibling
 [`vue-h5-template-ai-service`](https://github.com/fonghehe/vue-h5-template-ai-service). The two services share
-a JWT secret and a response envelope, so the frontend needs only one client.
+a JWT contract and response envelope; the frontend routes requests to each service separately.
 
 | | Business service (Go) | AI service (Python) |
 |---|---|---|
-| Workload | Short, transactional CRUD | Long-lived streaming |
+| Workload | Transactional commerce and account data | Long-lived streaming |
 | Scaling | Request rate | Concurrent streams |
 | Failure mode | Database latency | Upstream model latency |
 
 ## Demo accounts
 
-Seeding runs automatically on an empty database:
+Development seeding runs when `SEED=true`; production rejects it. Never deploy these credentials:
 
 | Username | Password | Roles |
 |---|---|---|
 | `user` | `123456` | user |
 | `admin` | `123456` | user, admin |
+
+Start with [Quick start](/quickstart), follow one checkout in [Commerce flow](/commerce), then use [Extend the service](/development) for a new endpoint or model.

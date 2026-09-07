@@ -8,11 +8,10 @@ Thanks for your interest in contributing. This document covers the workflow; beh
 ```bash
 git clone https://github.com/fonghehe/vue-h5-template-business-service.git
 cd vue-h5-template-business-service
-cp .env.example .env
 ```
 
-You need Go 1.25+. Tests that touch PostgreSQL run against the CI service container; most unit tests use an
-in-memory SQLite database and need no external services.
+You need Go 1.25+. Tests that touch PostgreSQL run against the CI service container; most unit tests use a
+temporary SQLite database file and need no external services. For native startup, follow [Quick start](/quickstart): copying `.env.example` alone does not export process variables.
 
 ## Development commands
 
@@ -28,6 +27,7 @@ make build     # compile the binary into bin/
 - Formatting is enforced by `gofmt`; the CI fails on unformatted code.
 - Static analysis runs `go vet` and `golangci-lint` (config in `.golangci.yml`).
 - The layered architecture is deliberate — business rules belong in `internal/service`, never in handlers.
+- Follow the concrete [Extend the service](/development) walkthrough for routes, models, migrations, ownership checks and tests.
 
 ## Adding an error code
 
@@ -40,6 +40,7 @@ different meaning. Add a new constant in `internal/apierr/errors.go` instead of 
 2. Run `make check` locally and keep it green.
 3. Keep the response envelope contract intact — renaming a JSON field is a breaking change.
 4. Update the API reference and configuration docs when the surface changes.
+5. Keep `/`, `/zh/`, `/ja/` documentation in sync; update the frontend OpenAPI contract for public API changes.
 
 ## Releasing
 

@@ -2,7 +2,10 @@ package database
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -23,6 +26,9 @@ func Seed(db *gorm.DB) error {
 	}
 	if err := seedProducts(db); err != nil {
 		return fmt.Errorf("seed products: %w", err)
+	}
+	if err := seedCommerce(db); err != nil {
+		return fmt.Errorf("seed commerce: %w", err)
 	}
 	return nil
 }
@@ -59,6 +65,10 @@ func seedProducts(db *gorm.DB) error {
 	}
 
 	for index := range demoProducts {
+		demoProducts[index].Name = demoProducts[index].Title
+		demoProducts[index].Cover = demoProducts[index].ImgURL
+		demoProducts[index].CategoryID = "general"
+		demoProducts[index].Brand = demoProducts[index].ShopName
 		demoProducts[index].SearchText = searchText(demoProducts[index])
 		if demoProducts[index].Status == "" {
 			demoProducts[index].Status = model.StatusOnSale
@@ -67,11 +77,95 @@ func seedProducts(db *gorm.DB) error {
 	return db.CreateInBatches(demoProducts, 50).Error
 }
 
+func seedCommerce(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := backfillLegacySKUInventory(tx); err != nil {
+			return err
+		}
+		var couponCount int64
+		if err := tx.Model(&model.Coupon{}).Count(&couponCount).Error; err != nil {
+			return err
+		}
+		if couponCount > 0 {
+			return nil
+		}
+		start := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+		end := time.Date(2099, 12, 31, 23, 59, 59, 0, time.UTC)
+		coupons := []model.Coupon{
+			{Code: "WELCOME10", Type: model.PromotionPercentage, Value: 1000, MinimumAmount: 0, StartAt: start, EndAt: end, UsageLimit: 10000, PerUserLimit: 1},
+			{Code: "SAVE20", Type: model.PromotionThresholdDiscount, Value: 2000, MinimumAmount: 10000, StartAt: start, EndAt: end, UsageLimit: 1000, PerUserLimit: 2},
+		}
+		return tx.Create(&coupons).Error
+	})
+}
+
+// backfillLegacySKUInventory is also a migration. Production databases with
+// seeding disabled still need existing catalogue rows to become sellable.
+func backfillLegacySKUInventory(tx *gorm.DB) error {
+	var products []model.Product
+	if err := tx.Find(&products).Error; err != nil {
+		return err
+	}
+	for _, product := range products {
+		var count int64
+		if err := tx.Model(&model.ProductSKU{}).Where("product_id = ?", product.ID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		price, err := legacyPriceCents(product.Price)
+		if err != nil {
+			return fmt.Errorf("product %d price: %w", product.ID, err)
+		}
+		sku := model.ProductSKU{
+			ProductID: product.ID, SKUCode: fmt.Sprintf("LEGACY-%06d", product.ID),
+			Name: "Default", Attributes: model.SKUAttributes{"variant": "Default"},
+			Price: price, OriginalPrice: price, Status: model.SKUStatusActive,
+		}
+		if err := tx.Create(&sku).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&model.Inventory{SKUID: sku.ID, Available: int64(product.Stock), Version: 1}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func legacyPriceCents(value string) (int64, error) {
+	parts := strings.Split(strings.TrimSpace(value), ".")
+	if len(parts) > 2 || len(parts) == 0 || parts[0] == "" {
+		return 0, fmt.Errorf("invalid decimal %q", value)
+	}
+	major, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || major < 0 {
+		return 0, fmt.Errorf("invalid decimal %q", value)
+	}
+	fraction := int64(0)
+	if len(parts) == 2 {
+		if len(parts[1]) > 2 {
+			return 0, fmt.Errorf("more than two decimal places in %q", value)
+		}
+		fractionText := parts[1] + strings.Repeat("0", 2-len(parts[1]))
+		if fractionText != "" {
+			fraction, err = strconv.ParseInt(fractionText, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid decimal %q", value)
+			}
+		}
+	}
+	if major > (math.MaxInt64-fraction)/100 {
+		return 0, fmt.Errorf("price out of range %q", value)
+	}
+	return major*100 + fraction, nil
+}
+
 // searchText builds the denormalised column used by keyword search. It is
 // maintained on both sides (seed and write path) so that search behaves the
 // same for seeded and operator-created products.
 func searchText(product model.Product) string {
-	return strings.Join([]string{product.Title, product.ShopName, product.ShopDesc, product.Description}, " ")
+	return strings.Join([]string{product.Name, product.Title, product.Brand, product.CategoryID, product.ShopName, product.ShopDesc, product.Description}, " ")
 }
 
 const (

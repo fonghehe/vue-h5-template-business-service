@@ -30,11 +30,28 @@ type favoriteRequest struct {
 // GET /api/product/list?page=1&pageSize=10&keyword=...&sort=...
 func (s *Server) listProducts(c *gin.Context) {
 	page, pageSize := pagination(c, defaultPageSize, maxPageSize)
+	priceMin, err := optionalNonNegativeInt64(c.Query("priceMin"))
+	if err != nil {
+		response.Fail(c, apierr.Validation("priceMin must be a non-negative integer in cents"))
+		return
+	}
+	priceMax, err := optionalNonNegativeInt64(c.Query("priceMax"))
+	if err != nil {
+		response.Fail(c, apierr.Validation("priceMax must be a non-negative integer in cents"))
+		return
+	}
+	if priceMin != nil && priceMax != nil && *priceMin > *priceMax {
+		response.Fail(c, apierr.Validation("priceMin must not exceed priceMax"))
+		return
+	}
 	result, err := s.services.Products.List(c.Request.Context(), service.ProductQuery{
 		Page:     page,
 		PageSize: pageSize,
 		Keyword:  strings.TrimSpace(c.Query("keyword")),
 		Sort:     strings.TrimSpace(c.Query("sort")),
+		Category: strings.TrimSpace(c.Query("category")),
+		PriceMin: priceMin,
+		PriceMax: priceMax,
 	})
 	if err != nil {
 		response.Fail(c, err)
@@ -187,6 +204,10 @@ func (s *Server) adminDeleteProduct(c *gin.Context) {
 // distinguish "field absent" from "field set to empty", which is what makes
 // PATCH semantics correct.
 type productPayload struct {
+	Name        *string `json:"name"        binding:"omitempty,max=255"`
+	CategoryID  *string `json:"categoryId"  binding:"omitempty,max=64"`
+	Brand       *string `json:"brand"       binding:"omitempty,max=120"`
+	Cover       *string `json:"cover"       binding:"omitempty,max=500"`
 	Title       *string `json:"title"       binding:"omitempty,max=255"`
 	ImgURL      *string `json:"imgUrl"      binding:"omitempty,max=500"`
 	Price       *string `json:"price"       binding:"omitempty,max=32"`
@@ -204,6 +225,10 @@ type productPayload struct {
 // anything the caller omitted.
 func (p productPayload) toService() service.ProductInput {
 	return service.ProductInput{
+		Name:        derefString(p.Name),
+		CategoryID:  derefString(p.CategoryID),
+		Brand:       derefString(p.Brand),
+		Cover:       derefString(p.Cover),
 		Title:       derefString(p.Title),
 		ImgURL:      derefString(p.ImgURL),
 		Price:       derefString(p.Price),
@@ -222,6 +247,18 @@ func (p productPayload) toService() service.ProductInput {
 // changes what was actually sent.
 func (p productPayload) mergeInto(existing model.Product) service.ProductInput {
 	input := p.toService()
+	if p.Name == nil {
+		input.Name = existing.Name
+	}
+	if p.CategoryID == nil {
+		input.CategoryID = existing.CategoryID
+	}
+	if p.Brand == nil {
+		input.Brand = existing.Brand
+	}
+	if p.Cover == nil {
+		input.Cover = existing.Cover
+	}
 	if p.Title == nil {
 		input.Title = existing.Title
 	}
@@ -277,4 +314,59 @@ func derefBool(value *bool) bool {
 		return false
 	}
 	return *value
+}
+
+type skuPayload struct {
+	SKUCode       string              `json:"skuCode" binding:"required,max=80"`
+	Name          string              `json:"name" binding:"required,max=255"`
+	Attributes    model.SKUAttributes `json:"attributes" binding:"required"`
+	Price         int64               `json:"price" binding:"gte=0"`
+	OriginalPrice int64               `json:"originalPrice" binding:"gte=0"`
+	Status        string              `json:"status" binding:"required,oneof=active inactive"`
+	Available     int64               `json:"available" binding:"gte=0"`
+}
+
+func (p skuPayload) toService() service.ProductSKUInput {
+	return service.ProductSKUInput{
+		SKUCode: strings.TrimSpace(p.SKUCode), Name: strings.TrimSpace(p.Name), Attributes: p.Attributes,
+		Price: p.Price, OriginalPrice: p.OriginalPrice, Status: p.Status, Available: p.Available,
+	}
+}
+
+func (s *Server) adminCreateSKU(c *gin.Context) {
+	productID, err := pathID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, apierr.Validation("id must be a positive integer"))
+		return
+	}
+	var input skuPayload
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.Fail(c, apierr.Validation("invalid SKU payload"))
+		return
+	}
+	sku, err := s.services.Products.CreateSKU(c.Request.Context(), productID, input.toService())
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.Created(c, sku)
+}
+
+func (s *Server) adminUpdateSKU(c *gin.Context) {
+	skuID, err := pathID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, apierr.Validation("id must be a positive integer"))
+		return
+	}
+	var input skuPayload
+	if err := c.ShouldBindJSON(&input); err != nil {
+		response.Fail(c, apierr.Validation("invalid SKU payload"))
+		return
+	}
+	sku, err := s.services.Products.UpdateSKU(c.Request.Context(), skuID, input.toService())
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, sku)
 }

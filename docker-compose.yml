@@ -10,12 +10,20 @@ services:
       JWT_SECRET: local-compose-secret-change-in-production
       JWT_ISSUER: vue-h5-template
       JWT_AUDIENCE: vue-h5-template-api
+      MOCK_PAYMENT_WEBHOOK_SECRET: local-mock-payment-webhook-secret-change-me
       CORS_ORIGINS: http://localhost:5173
       RATE_LIMIT_ENABLED: "true"
+      REDIS_URL: redis://redis:6379/0
+      PRODUCT_CACHE_TTL: 5m
+      ORDER_PAYMENT_TTL: 15m
+      ORDER_EXPIRATION_INTERVAL: 30s
+      ORDER_EXPIRATION_BATCH_SIZE: "100"
     ports:
       - "8002:8002"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   postgres:
@@ -30,6 +38,15 @@ services:
       - business-postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vue_h5 -d vue_h5_business"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 15

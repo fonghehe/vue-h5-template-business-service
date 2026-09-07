@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"github.com/fonghehe/vue-h5-template-business-service/internal/config"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/database"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/logging"
+	"github.com/fonghehe/vue-h5-template-business-service/internal/model"
+	"github.com/fonghehe/vue-h5-template-business-service/internal/service"
 )
 
 // testSecret is long enough to satisfy config validation. Tests never talk to a
@@ -313,6 +316,46 @@ func TestProductListSupportsKeywordSearch(t *testing.T) {
 	}
 }
 
+func TestProductListSupportsCategoryAndCentPriceRange(t *testing.T) {
+	server, _ := newTestServer(t)
+
+	recorder := server.do(t, http.MethodGet, "/api/product/list?category=general&priceMin=500000&priceMax=700000&pageSize=50", "", nil)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	var page struct {
+		Items []model.Product `json:"items"`
+		Total int             `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(decode(t, recorder).Data, &page))
+	require.Positive(t, page.Total)
+	for _, product := range page.Items {
+		assert.Equal(t, "general", product.CategoryID)
+	}
+
+	invalid := server.do(t, http.MethodGet, "/api/product/list?priceMin=200&priceMax=100", "", nil)
+	require.Equal(t, http.StatusUnprocessableEntity, invalid.Code)
+}
+
+func TestProductPriceRangeMustMatchOneSKU(t *testing.T) {
+	server, db := newTestServer(t)
+	product := model.Product{Name: "Split Price", Title: "Split Price", Price: "1.00", VipPrice: "1.00",
+		Status: model.StatusOnSale, SearchText: "split-price-boundary"}
+	require.NoError(t, db.Create(&product).Error)
+	for _, price := range []int64{100, 400} {
+		sku := model.ProductSKU{ProductID: product.ID, SKUCode: fmt.Sprintf("SPLIT-%d", price),
+			Name: "Variant", Attributes: model.SKUAttributes{}, Price: price, OriginalPrice: price,
+			Status: model.SKUStatusActive}
+		require.NoError(t, db.Create(&sku).Error)
+	}
+	response := server.do(t, http.MethodGet, "/api/product/list?keyword=split-price-boundary&priceMin=200&priceMax=300", "", nil)
+	require.Equal(t, http.StatusOK, response.Code)
+	var page struct {
+		Total int64 `json:"total"`
+	}
+	require.NoError(t, json.Unmarshal(decode(t, response).Data, &page))
+	assert.Zero(t, page.Total)
+}
+
 func TestProductDetailRequiresValidId(t *testing.T) {
 	server, _ := newTestServer(t)
 
@@ -563,6 +606,131 @@ func TestAccessTokensAreNotAcceptedAsRefreshTokens(t *testing.T) {
 		`{"refreshToken":"`+token+`"}`, nil)
 
 	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+}
+
+func TestCommerceHTTPFlowAndIdempotency(t *testing.T) {
+	server, _ := newTestServer(t)
+	token := loginAs(t, server, "user")
+
+	detail := server.do(t, http.MethodGet, "/api/product/detail?id=1", "", nil)
+	require.Equal(t, http.StatusOK, detail.Code)
+	var product model.Product
+	require.NoError(t, json.Unmarshal(decode(t, detail).Data, &product))
+	require.NotEmpty(t, product.SKUs)
+	require.NotNil(t, product.SKUs[0].Inventory)
+
+	added := server.do(t, http.MethodPost, "/api/cart/items", `{"skuId":1,"quantity":2}`, bearer(token))
+	require.Equal(t, http.StatusCreated, added.Code, added.Body.String())
+	created := server.do(t, http.MethodPost, "/api/orders", `{}`, map[string]string{
+		"Authorization": "Bearer " + token, "Idempotency-Key": "http-checkout-1",
+	})
+	require.Equal(t, http.StatusCreated, created.Code, created.Body.String())
+	var order model.Order
+	require.NoError(t, json.Unmarshal(decode(t, created).Data, &order))
+	require.Equal(t, model.OrderPendingPayment, order.Status)
+	require.Len(t, order.Items, 1)
+
+	replayed := server.do(t, http.MethodPost, "/api/orders", `{}`, map[string]string{
+		"Authorization": "Bearer " + token, "Idempotency-Key": "http-checkout-1",
+	})
+	require.Equal(t, http.StatusOK, replayed.Code)
+	var replayedOrder model.Order
+	require.NoError(t, json.Unmarshal(decode(t, replayed).Data, &replayedOrder))
+	assert.Equal(t, order.ID, replayedOrder.ID)
+
+	paymentResponse := server.do(t, http.MethodPost, "/api/orders/"+itoa(order.ID)+"/payment", "", bearer(token))
+	require.Equal(t, http.StatusCreated, paymentResponse.Code, paymentResponse.Body.String())
+	var payment model.Payment
+	require.NoError(t, json.Unmarshal(decode(t, paymentResponse).Data, &payment))
+	callback := service.PaymentCallback{
+		EventID: "http-event-1", OrderNo: order.OrderNo, Reference: payment.Reference,
+		Amount: order.PayableAmount, Status: service.PaymentCallbackSuccess,
+	}
+	callbackJSON, err := json.Marshal(callback)
+	require.NoError(t, err)
+	provider := service.NewMockPaymentProvider(server.config.MockPaymentWebhookSecret)
+	webhook := server.do(t, http.MethodPost, "/api/payments/mock/webhook", string(callbackJSON), map[string]string{
+		"X-Mock-Signature": provider.Sign(callback),
+	})
+	require.Equal(t, http.StatusOK, webhook.Code, webhook.Body.String())
+	assert.Contains(t, webhook.Body.String(), model.OrderPaid)
+}
+
+func TestOrderOwnershipPreventsIDOR(t *testing.T) {
+	server, _ := newTestServer(t)
+	userToken := loginAs(t, server, "user")
+	adminToken := loginAs(t, server, "admin")
+	require.Equal(t, http.StatusCreated, server.do(t, http.MethodPost, "/api/cart/items", `{"skuId":1,"quantity":1}`, bearer(userToken)).Code)
+	created := server.do(t, http.MethodPost, "/api/orders", `{}`, map[string]string{
+		"Authorization": "Bearer " + userToken, "Idempotency-Key": "idor-order",
+	})
+	require.Equal(t, http.StatusCreated, created.Code)
+	var order model.Order
+	require.NoError(t, json.Unmarshal(decode(t, created).Data, &order))
+
+	foreign := server.do(t, http.MethodGet, "/api/orders/"+itoa(order.ID), "", bearer(adminToken))
+	require.Equal(t, http.StatusNotFound, foreign.Code)
+	assert.Equal(t, 4040, decode(t, foreign).Code)
+}
+
+func TestCartRejectsUnboundedQuantityAndMetricsAreExposed(t *testing.T) {
+	server, _ := newTestServer(t)
+	token := loginAs(t, server, "user")
+	recorder := server.do(t, http.MethodPost, "/api/cart/items", `{"skuId":1,"quantity":100}`, bearer(token))
+	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
+
+	metrics := server.do(t, http.MethodGet, "/metrics", "", nil)
+	require.Equal(t, http.StatusOK, metrics.Code)
+	assert.Contains(t, metrics.Body.String(), "http_requests_total")
+	assert.Contains(t, metrics.Body.String(), "orders_created_total")
+}
+
+func TestAdminCanCreateSKUAndAdvancePaidOrder(t *testing.T) {
+	server, _ := newTestServer(t)
+	adminToken := loginAs(t, server, "admin")
+	userToken := loginAs(t, server, "user")
+
+	skuResponse := server.do(t, http.MethodPost, "/api/admin/products/1/skus", `{
+		"skuCode":"IPHONE-BLACK-128","name":"Black / 128GB",
+		"attributes":{"color":"Black","storage":"128GB"},
+		"price":599900,"originalPrice":629900,"status":"active","available":10
+	}`, bearer(adminToken))
+	require.Equal(t, http.StatusCreated, skuResponse.Code, skuResponse.Body.String())
+	var sku model.ProductSKU
+	require.NoError(t, json.Unmarshal(decode(t, skuResponse).Data, &sku))
+	require.NotZero(t, sku.ID)
+	require.NotNil(t, sku.Inventory)
+	assert.Equal(t, int64(10), sku.Inventory.Available)
+
+	require.Equal(t, http.StatusCreated, server.do(t, http.MethodPost, "/api/cart/items",
+		`{"skuId":1,"quantity":1}`, bearer(userToken)).Code)
+	created := server.do(t, http.MethodPost, "/api/orders", `{}`, map[string]string{
+		"Authorization": "Bearer " + userToken, "Idempotency-Key": "advance-order",
+	})
+	require.Equal(t, http.StatusCreated, created.Code)
+	var order model.Order
+	require.NoError(t, json.Unmarshal(decode(t, created).Data, &order))
+	paymentResponse := server.do(t, http.MethodPost, "/api/orders/"+itoa(order.ID)+"/payment", "", bearer(userToken))
+	require.Equal(t, http.StatusCreated, paymentResponse.Code)
+	var payment model.Payment
+	require.NoError(t, json.Unmarshal(decode(t, paymentResponse).Data, &payment))
+	callback := service.PaymentCallback{EventID: "advance-paid", OrderNo: order.OrderNo, Reference: payment.Reference,
+		Amount: order.PayableAmount, Status: service.PaymentCallbackSuccess}
+	callbackBody, err := json.Marshal(callback)
+	require.NoError(t, err)
+	provider := service.NewMockPaymentProvider(server.config.MockPaymentWebhookSecret)
+	require.Equal(t, http.StatusOK, server.do(t, http.MethodPost, "/api/payments/mock/webhook", string(callbackBody),
+		map[string]string{"X-Mock-Signature": provider.Sign(callback)}).Code)
+
+	processing := server.do(t, http.MethodPut, "/api/admin/orders/"+itoa(order.ID)+"/status",
+		`{"status":"PROCESSING"}`, bearer(adminToken))
+	require.Equal(t, http.StatusOK, processing.Code, processing.Body.String())
+	completed := server.do(t, http.MethodPut, "/api/admin/orders/"+itoa(order.ID)+"/status",
+		`{"status":"COMPLETED"}`, bearer(adminToken))
+	require.Equal(t, http.StatusOK, completed.Code, completed.Body.String())
+	illegal := server.do(t, http.MethodPut, "/api/admin/orders/"+itoa(order.ID)+"/status",
+		`{"status":"COMPLETED"}`, bearer(adminToken))
+	require.Equal(t, http.StatusConflict, illegal.Code)
 }
 
 // itoa avoids importing strconv in every assertion.

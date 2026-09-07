@@ -25,6 +25,7 @@ func RequestID() gin.HandlerFunc {
 			requestID = uuid.NewString()
 		}
 		c.Set(response.ContextKeyRequestID, requestID)
+		c.Request = c.Request.WithContext(response.WithRequestID(c.Request.Context(), requestID))
 		c.Header("X-Request-ID", requestID)
 		c.Next()
 	}
@@ -51,7 +52,7 @@ func CORS(origins []string) gin.HandlerFunc {
 				c.Header("Access-Control-Allow-Origin", origin)
 				c.Header("Vary", "Origin")
 				c.Header("Access-Control-Allow-Credentials", "true")
-				c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+				c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID, Idempotency-Key, X-Mock-Signature")
 				c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
 				c.Header("Access-Control-Max-Age", "86400")
 			}

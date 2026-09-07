@@ -1,64 +1,53 @@
 # vue-h5-template-business-service
 
-The **business API** for [vue-h5-template](https://github.com/fonghehe/vue-h5-template) — authentication,
-user profile and favourites, and the product catalogue. Built with Go, Gin and GORM, backed by PostgreSQL.
+English | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-It is one half of the backend pair. Streaming AI workloads live in the sibling
-[`vue-h5-template-ai-service`](https://github.com/fonghehe/vue-h5-template-ai-service); the two services share a JWT
-secret and a response envelope so the frontend needs only one client.
+Go/Gin commerce API for vue-h5-template. This repository owns authentication, profile, favourites, the product catalogue, SKU inventory, cart, coupons, orders and mock payment state. The H5 UI and streaming AI service live in separate repositories.
 
-## Highlights
+The checkout path is `Product → SKU → Inventory → Cart → Coupon → Order → Payment → Cancel/Timeout`. PostgreSQL is the source of truth: order creation, inventory and coupon reservations, snapshots and cart clearing commit together. Database unique constraints make order retries and payment callbacks safe; an expiration worker releases unpaid reservations. Optional Redis caches catalogue data only, never authoritative inventory or orders.
 
-- **Frontend-aligned contract** — every response is `{ code, message, data, error, requestId }` with `code === 0`
-  meaning success, matching `@vh5/api-client`.
-- **Layered architecture** — `config → model → repository → service → httpapi`, with a versioned migration and a
-  deterministic seed.
-- **Production hygiene** — fail-fast config validation, rate limiting, CORS and trusted-proxy hardening, request
-  correlation ids, structured JSON logs, graceful shutdown.
-- **Ops-ready** — multi-stage non-root Docker image, health/readiness probes, `docker compose` with PostgreSQL,
-  GitHub Actions CI (fmt + vet + race + coverage + lint + image build).
+## Stack
+
+Go 1.25, Gin, GORM, PostgreSQL 17, optional Redis, JWT, Prometheus, VitePress documentation. SQLite is used for isolated tests, not production. Payment is a signed **mock provider**, not a real payment integration.
 
 ## Quick start
 
 ```bash
-cp .env.example .env
-docker compose up --build          # or: make run (needs local PostgreSQL)
+docker compose up -d --build
+curl http://localhost:8002/health
+curl http://localhost:8002/ready
+curl 'http://localhost:8002/api/product/list?page=1&pageSize=10'
 ```
 
-The API listens on `http://localhost:8002`. Try the public catalogue:
+The checked-in Compose stack starts the API, PostgreSQL and Redis with **development-only** credentials and seed data. For a native Go process, export its environment variables explicitly; it does not read `.env` automatically. See the [quick start](https://fonghehe.github.io/vue-h5-template-business-service/quickstart) for a working database URL and commands.
+
+To run the API from source instead of in Compose (do not start the Compose `business` service as well):
 
 ```bash
-curl http://localhost:8002/api/product/list
+POSTGRES_PORT=5433 docker compose up -d postgres
+export DATABASE_URL='postgres://vue_h5:vue_h5_local@127.0.0.1:5433/vue_h5_business?sslmode=disable'
+go run ./cmd/server
 ```
 
-## Documentation
+The bare Go command otherwise uses `localhost:5432`, which may belong to another application. Never migrate or delete that database just to start this service.
 
-The documentation is written with VitePress and published to GitHub Pages at
-<https://fonghehe.github.io/vue-h5-template-business-service/>. It is available in three languages —
-**English** (primary), **简体中文** and **日本語**:
-
-| Language | URL |
-|---|---|
-| English | <https://fonghehe.github.io/vue-h5-template-business-service/> |
-| 简体中文 | <https://fonghehe.github.io/vue-h5-template-business-service/zh/> |
-| 日本語 | <https://fonghehe.github.io/vue-h5-template-business-service/ja/> |
-
-Preview locally:
+## Check
 
 ```bash
-cd docs && npm install && npm run docs:dev
+go test ./...
+go test -race ./...
+go vet ./...
+make lint
+make build
 ```
 
-Publishing is automated: `.github/workflows/deploy-docs.yml` builds and deploys the site whenever `docs/`
-changes on `main`.
+The PostgreSQL 100-buyer/10-stock tests require `TEST_DATABASE_URL`; CI provides an isolated test database. Docs are maintained in English, Simplified Chinese and Japanese:
 
-## Development
+- [Documentation](https://fonghehe.github.io/vue-h5-template-business-service/)
+- [中文文档](https://fonghehe.github.io/vue-h5-template-business-service/zh/)
+- [日本語ドキュメント](https://fonghehe.github.io/vue-h5-template-business-service/ja/)
 
-```bash
-make check     # fmt + vet + test
-make test-race # race detector + coverage
-make lint      # golangci-lint
-```
+Locally: `cd docs && pnpm install --frozen-lockfile && pnpm docs:dev`.
 
 ## License
 

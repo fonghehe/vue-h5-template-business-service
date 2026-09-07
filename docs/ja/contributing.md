@@ -9,11 +9,10 @@
 ```bash
 git clone https://github.com/fonghehe/vue-h5-template-business-service.git
 cd vue-h5-template-business-service
-cp .env.example .env
 ```
 
 Go 1.25+ が必要です。PostgreSQL に触れるテストは CI のサービスコンテナに対して実行され、ほとんどのユニットテストは
-インメモリ SQLite データベースを使うため外部サービスを必要としません。
+一時 SQLite データベースファイルを使うため外部サービスを必要としません。
 
 ## 開発コマンド
 
@@ -26,6 +25,8 @@ make build     # bin/ にバイナリをコンパイル
 
 ## コードスタイル
 
+Go API、モデル、トランザクション、テストの追加は[サービスの拡張](/ja/development)の実コード経路に従ってください。`.env.example` のコピーだけでは Go プロセスの環境変数は設定されません。起動は[クイックスタート](/ja/quickstart)を参照してください。
+
 - フォーマットは `gofmt` で強制され、未フォーマットのコードは CI で失敗します。
 - 静的解析は `go vet` と `golangci-lint`（設定は `.golangci.yml`）で実行されます。
 - レイヤードアーキテクチャは意図的なものです — ビジネスルールは `internal/service` に置き、ハンドラーには置かないでください。
@@ -36,6 +37,8 @@ make build     # bin/ にバイナリをコンパイル
 古いコードを使い回すのではなく、`internal/apierr/errors.go` に新しい定数を追加してください。
 
 ## プルリクエストチェックリスト
+
+公開 API の変更では `/`、`/zh/`、`/ja/` の文書とフロントエンドリポジトリの OpenAPI 契約を揃えます。
 
 1. 変更に対するテストを追加または更新する。
 2. ローカルで `make check` を実行してグリーンを維持する。

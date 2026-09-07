@@ -3,8 +3,8 @@ layout: home
 
 hero:
   name: "business-service"
-  text: "vue-h5-template のビジネス API"
-  tagline: 認証、ユーザープロフィールとお気に入り、商品カタログ — Go・Gin・GORM を PostgreSQL 上で構成。
+  text: "vue-h5-template のコマース API"
+  tagline: 認証、SKU 在庫、カート、クーポン、トランザクション注文を一つの Go サービスで提供します。
   actions:
     - theme: brand
       text: クイックスタート
@@ -17,33 +17,35 @@ hero:
       link: https://github.com/fonghehe/vue-h5-template-business-service
 
 features:
-  - title: フロントエンドに整合した契約
-    details: すべてのレスポンスは <code>{ code, message, data, error, requestId }</code> で、<code>code === 0</code> が成功を意味します。<code>@vh5/api-client</code> と完全に一致します。
-  - title: レイヤード・アーキテクチャ
-    details: config → model → repository → service → httpapi。バージョン管理されたマイグレーションと、決定的で冪等なシードを備えています。
-  - title: 本番運用のための設計
-    details: フェイルファストな設定検証、IP 単位のレート制限、CORS と信頼済みプロキシの強化、リクエスト相関 ID、構造化 JSON ログ。
-  - title: 運用即応
-    details: マルチステージの非 root Docker イメージ、ヘルス/レディネスプローブ、PostgreSQL 付き docker compose、GitHub Actions CI。
+  - title: トランザクション注文
+    details: サーバー側 SKU 価格、条件付き在庫確保、クーポン、注文スナップショット、カート消去を一括コミットします。
+  - title: 再試行に強い決済状態
+    details: DB 制約による注文・Webhook の冪等性、状態遷移、キャンセルと期限切れ時の確保解除。
+  - title: 既存 H5 契約を維持
+    details: 認証、プロフィール、お気に入り、商品 API は共通 JSON エンベロープで継続します。
+  - title: 運用可能なサービス
+    details: PostgreSQL、任意の Redis 商品キャッシュ、構造化ログ、Prometheus 指標、複数インスタンス対応 Worker。
 ---
 
 ## バックエンドの二本柱
 
-これは vue-h5-template バックエンドの片割れです。ストリーミング AI のワークロードは兄弟リポジトリ
+これは Go HTTP サービスで、H5 フロントエンドではありません。ページ、Vue コンポーネント、クライアント Store、Vite アプリはありません。ストリーミング AI は兄弟リポジトリ
 [`vue-h5-template-ai-service`](https://github.com/fonghehe/vue-h5-template-ai-service) にあります。二つのサービスは
-JWT シークレットとレスポンスエンベロープを共有するため、フロントエンドはクライアントを一つ用意するだけで済みます。
+JWT 契約とレスポンスエンベロープを共有し、フロントエンドは各サービスにリクエストを振り分けます。
 
 | | ビジネスサービス (Go) | AI サービス (Python) |
 |---|---|---|
-| ワークロード | 短いトランザクション CRUD | 長時間のストリーミング |
+| ワークロード | トランザクション取引とアカウント | 長時間のストリーミング |
 | スケーリング | リクエストレート | 同時ストリーム数 |
 | 障害モード | データベース遅延 | 上流モデルの遅延 |
 
 ## デモアカウント
 
-空のデータベースではシードが自動実行されます：
+デモアカウントは `SEED=true` の開発環境に限ります。本番環境では有効化できません：
 
 | ユーザー名 | パスワード | ロール |
 |---|---|---|
 | `user` | `123456` | user |
 | `admin` | `123456` | user, admin |
+
+[クイックスタート](/ja/quickstart)で起動し、[取引フロー](/ja/commerce)で注文を確認してから、[サービスの拡張](/ja/development)を参照してください。

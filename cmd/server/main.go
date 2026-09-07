@@ -46,6 +46,26 @@ func run() error {
 	}
 
 	server := httpapi.New(cfg, db, logger)
+	defer func() {
+		if closeErr := server.Close(); closeErr != nil {
+			logger.Error("cache close failed", "error", closeErr)
+		}
+	}()
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("access database pool: %w", err)
+	}
+	defer func() {
+		if closeErr := sqlDB.Close(); closeErr != nil {
+			logger.Error("database pool close failed", "error", closeErr)
+		}
+	}()
+	workerCtx, stopWorkers := context.WithCancel(context.Background())
+	server.StartWorkers(workerCtx)
+	defer func() {
+		stopWorkers()
+		server.WaitWorkers()
+	}()
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           server.Router(),
@@ -77,6 +97,7 @@ func run() error {
 		return fmt.Errorf("server error: %w", err)
 	case sig := <-shutdown:
 		logger.Info("shutdown signal received", "signal", sig.String())
+		stopWorkers()
 
 		// Drain in-flight requests, then close the database pool.
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
