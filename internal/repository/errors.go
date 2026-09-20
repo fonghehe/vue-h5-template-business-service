@@ -23,6 +23,5 @@ func isDuplicate(err error) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "duplicate key") ||
-		strings.Contains(message, "unique constraint") ||
-		strings.Contains(message, "constraint failed")
+		strings.Contains(message, "unique constraint")
 }

@@ -28,15 +28,22 @@ docker compose ps
 ## 方法 B — ソースから実行
 
 ```bash
-# PostgreSQL だけを起動し、既存の 5432 番ポートを避けます。
-POSTGRES_PORT=5433 docker compose up -d postgres
-export DATABASE_URL='postgres://vue_h5:vue_h5_local@127.0.0.1:5433/vue_h5_business?sslmode=disable'
+# 初回のみコピーし、プロジェクト内で DB 接続先を設定します。
+cp .env.example .env
+# 任意：ローカル DB がない場合は Compose で PostgreSQL を起動します。
+POSTGRES_PORT=5433 docker compose up -d --wait postgres
 go run ./cmd/server
 ```
 
-`make run` も同じ Go コマンドを実行します。Compose の `business` サービスはホストの 8002 番ポートを使うため、同時に起動しないでください。Go プロセスは **`.env` を自動読込しません**。シェルで export するか env-file ツールを使ってください。`.env.example` には 5432 番ポート用の開発認証情報があり、上記の手順では 5433 に変更します。Redis は任意で、ネイティブ実行時の `REDIS_URL` 既定値は空です。標準の Go モジュールプロキシがタイムアウトする場合は `GOPROXY=https://goproxy.cn go mod download` を先に実行し、リポジトリの `go.sum` 検証は有効のままにしてください。詳細は[設定](/ja/configuration)。
+`make run` も同じ Go コマンドを実行します。Compose の `business` サービスはホストの 8002 番ポートを使うため、同時に起動しないでください。サーバーは作業ディレクトリの `.env` を自動で読み込むため、リポジトリ直下から実行してください。既存のプロセス環境変数が優先されます。`.env.example` はポート 5433 を使います。ローカル PostgreSQL がある場合は `.env` の `DATABASE_URL` を専用 DB に設定し、Compose の起動を省略できます。Redis は任意で、ネイティブ実行時の `REDIS_URL` 既定値は空です。標準の Go モジュールプロキシがタイムアウトする場合は `GOPROXY=https://goproxy.cn go mod download` を先に実行し、リポジトリの `go.sum` 検証は有効のままにしてください。詳細は[設定](/ja/configuration)。
 
-`DATABASE_URL` を設定せずに `go run ./cmd/server` を実行すると、既定の `localhost:5432` に接続します。そこが別アプリのデータベースである可能性があります。本サービスを起動するために既存テーブルを移行・削除せず、上記の専用 Compose データベースと接続 URL を使用してください。起動時はアプリのマイグレーション前に互換性のない `users`/`products` スキーマを拒否します。
+`.env` も明示的な `DATABASE_URL` もない状態で `go run ./cmd/server` を実行すると、既定の `localhost:5432` に接続します。そこが別アプリのデータベースである可能性があります。本サービスを起動するために既存テーブルを移行・削除せず、専用データベースを使い、接続 URL をプロジェクトの `.env` に設定してください。起動時はアプリのマイグレーション前に互換性のない `users`/`products` スキーマを拒否します。
+
+## 対話型 API ドキュメント
+
+開発環境の Swagger UI は `http://localhost:8002/swagger/index.html` から開けます。現在の OpenAPI 契約は `/openapi.yaml` です。ページは `github.com/swaggo/gin-swagger` で登録し、リソースは `github.com/swaggo/files` が提供します。別のドキュメントサーバーや CDN は不要です。既存の OpenAPI 3 契約を読み込むため、`swag init` で Swagger 2 文書を生成する必要はありません。`APP_ENV=production` ではこれらのルートを登録しません。
+
+`POST /api/auth/login` で開発アカウント `user` / `123456` を使ってログインし、`data.accessToken` を **Authorize** に入力してください。管理 API は `admin` / `123456` を使います。決済はモックで、実際の課金は発生しません。
 
 ## API を試す
 

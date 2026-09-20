@@ -24,7 +24,7 @@ make build     # 编译二进制到 bin/
 
 ## 代码风格
 
-新增 Go 接口、持久化模型、事务与测试时，按[扩展服务](/zh/development)的真实代码路径操作；只复制 `.env.example` 不会为 Go 进程导出环境变量，启动步骤见[快速开始](/zh/quickstart)。
+新增 Go 接口、持久化模型、事务与测试时，按[扩展服务](/zh/development)的真实代码路径操作；将 `.env.example` 复制为 `.env` 后，服务会自动加载项目配置，启动步骤见[快速开始](/zh/quickstart)。
 
 - 格式化由 `gofmt` 强制，CI 会对未格式化代码报错。
 - 静态分析运行 `go vet` 与 `golangci-lint`（配置见 `.golangci.yml`）。

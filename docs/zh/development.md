@@ -67,3 +67,16 @@ pnpm docs:dev
 ```
 
 文档镜像在 `/`、`/zh/`、`/ja/`，改页面时一起更新对应语言和侧栏链接。VitePress 使用内建本地搜索与代码高亮，没有额外 Mermaid 渲染器；架构变化优先用清晰的表格或文字，不依赖只显示为代码块的图。
+
+## 新增功能回归检查
+
+`internal/httpapi/favorite_status_test.go` 覆盖用户隔离、版本路径、取消后查询、鉴权、非法／隐藏商品和显式布尔值校验；`internal/service/favorite_test.go` 覆盖收藏列表分页与有界查询次数。SQLite 测试验证本地规则，真实 PostgreSQL 集成需要 `TEST_DATABASE_URL`，应单独说明验证结果。
+
+```bash
+go test ./internal/httpapi -run 'TestFavorite'
+go test ./internal/service -run 'TestFavorites'
+go test -race ./...
+go vet ./...
+```
+
+[API](./api.md)

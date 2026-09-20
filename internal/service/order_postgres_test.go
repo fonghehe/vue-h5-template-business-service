@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"github.com/fonghehe/vue-h5-template-business-service/internal/config"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/database"
@@ -25,7 +26,8 @@ import (
 
 // This runs in CI against PostgreSQL. Separate users/carts exercise the entire
 // order transaction rather than only the inventory repository primitive.
-func TestPostgresConcurrentOrdersNeverOversell(t *testing.T) {
+func newPostgresCommerceDB(t *testing.T) *gorm.DB {
+	t.Helper()
 	dsn := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
 	if dsn == "" {
 		t.Skip("TEST_DATABASE_URL is not configured")
@@ -45,6 +47,7 @@ func TestPostgresConcurrentOrdersNeverOversell(t *testing.T) {
 	require.NoError(t, err)
 	query := parsed.Query()
 	query.Set("search_path", schema)
+	query.Set("application_name", schema)
 	parsed.RawQuery = query.Encode()
 	db, err := database.Open(database.Options{Driver: "postgres", DSN: parsed.String(),
 		MaxOpenConns: 30, MaxIdleConns: 20, ConnMaxLifetime: time.Minute, AutoMigrate: true, Quiet: true})
@@ -53,6 +56,11 @@ func TestPostgresConcurrentOrdersNeverOversell(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 
+	return db
+}
+
+func TestPostgresConcurrentOrdersNeverOversell(t *testing.T) {
+	db := newPostgresCommerceDB(t)
 	product := model.Product{Name: "Concurrent order", Title: "Concurrent order", Price: "1.00",
 		VipPrice: "1.00", Status: model.StatusOnSale, SearchText: "concurrent order"}
 	require.NoError(t, db.Create(&product).Error)

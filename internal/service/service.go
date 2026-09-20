@@ -5,10 +5,11 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"strings"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -41,7 +42,7 @@ func NewPage[T any](items []T, total int64, page, pageSize int) Page[T] {
 		Total:    total,
 		Page:     page,
 		PageSize: pageSize,
-		HasMore:  int64(page*pageSize) < total,
+		HasMore:  total > 0 && pageSize > 0 && int64(page) <= (total-1)/int64(pageSize),
 	}
 }
 
@@ -53,9 +54,8 @@ type FavoriteResult struct {
 
 // Container wires every service together.
 type Container struct {
-	Config config.Config
-	Auth   *AuthService
-	Users  *UserService
+	Auth  *AuthService
+	Users *UserService
 	// Products is exported so the HTTP layer can also serve operator routes.
 	Products  *ProductService
 	Favorites *FavoriteService
@@ -73,7 +73,6 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger, cache productcache
 	issuer := auth.New(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTAudience)
 
 	return &Container{
-		Config:    cfg,
 		Auth:      NewAuthService(cfg, users, issuer),
 		Users:     NewUserService(users),
 		Products:  NewProductService(products, commerce, cache, logger),
@@ -84,18 +83,27 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger, cache productcache
 	}
 }
 
+// AuthStore is the storage boundary needed by authentication. Tests can replace
+// it without requiring a database; production uses UserRepository.
+type AuthStore interface {
+	FindByUsername(context.Context, string) (model.User, error)
+	FindByID(context.Context, uint) (model.User, error)
+	CreateSession(context.Context, model.RefreshSession) error
+	RotateSession(context.Context, string, model.RefreshSession) error
+	RevokeSession(context.Context, string) error
+	CleanupSessions(context.Context, int) error
+}
+
 // AuthService handles credential exchange and token rotation.
 type AuthService struct {
 	config config.Config
-	users  *repository.UserRepository
+	users  AuthStore
 	issuer *auth.Issuer
-	// verifyUser is overridable in tests to avoid bcrypt cost.
-	verifyUser func(hash, password string) bool
 }
 
 // NewAuthService builds an authentication service.
-func NewAuthService(cfg config.Config, users *repository.UserRepository, issuer *auth.Issuer) *AuthService {
-	return &AuthService{config: cfg, users: users, issuer: issuer, verifyUser: comparePassword}
+func NewAuthService(cfg config.Config, users AuthStore, issuer *auth.Issuer) *AuthService {
+	return &AuthService{config: cfg, users: users, issuer: issuer}
 }
 
 // LoginResult is the payload returned by login and refresh.
@@ -124,7 +132,7 @@ func (s *AuthService) Login(ctx context.Context, username, password string, issu
 		return LoginResult{}, auth.TokenPair{}, err
 	}
 
-	if !s.verifyUser(user.PasswordHash, password) {
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)) != nil {
 		return LoginResult{}, auth.TokenPair{}, apierr.Unauthorized("username or password is incorrect")
 	}
 	if user.Status != "active" {
@@ -135,6 +143,15 @@ func (s *AuthService) Login(ctx context.Context, username, password string, issu
 		s.config.AccessTokenTTL, s.config.RefreshTokenTTL, issueRefresh)
 	if err != nil {
 		return LoginResult{}, auth.TokenPair{}, apierr.Wrap(apierr.CodeInternal, "could not issue token", err)
+	}
+	if pair.RefreshToken != "" {
+		session, err := s.session(pair.RefreshToken, user.ID)
+		if err != nil {
+			return LoginResult{}, auth.TokenPair{}, err
+		}
+		if err := s.users.CreateSession(ctx, session); err != nil {
+			return LoginResult{}, auth.TokenPair{}, err
+		}
 	}
 	return LoginResult{User: user.Public(), AccessToken: pair.AccessToken, ExpiresIn: pair.ExpiresIn}, pair, nil
 }
@@ -155,7 +172,10 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (LoginRe
 
 	user, err := s.users.FindByID(ctx, userID)
 	if err != nil {
-		return LoginResult{}, auth.TokenPair{}, apierr.Unauthorized("account no longer exists")
+		if repository.IsNotFound(err) {
+			return LoginResult{}, auth.TokenPair{}, apierr.Unauthorized("account no longer exists")
+		}
+		return LoginResult{}, auth.TokenPair{}, err
 	}
 	if user.Status != "active" {
 		return LoginResult{}, auth.TokenPair{}, apierr.Forbidden("account is disabled")
@@ -166,25 +186,72 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (LoginRe
 	if err != nil {
 		return LoginResult{}, auth.TokenPair{}, apierr.Wrap(apierr.CodeInternal, "could not issue token", err)
 	}
+	next, err := s.session(pair.RefreshToken, user.ID)
+	if err != nil {
+		return LoginResult{}, auth.TokenPair{}, err
+	}
+	if err := s.users.RotateSession(ctx, tokenHash(refreshToken), next); err != nil {
+		return LoginResult{}, auth.TokenPair{}, err
+	}
 	return LoginResult{User: user.Public(), AccessToken: pair.AccessToken, ExpiresIn: pair.ExpiresIn}, pair, nil
 }
 
 // VerifyAccessToken validates a bearer token and returns its claims.
-func (s *AuthService) VerifyAccessToken(token string) (*auth.Claims, error) {
+func (s *AuthService) VerifyAccessToken(ctx context.Context, token string) (*auth.Claims, error) {
 	claims, err := s.issuer.Verify(token, auth.AccessToken)
 	if err != nil {
 		return nil, apierr.Unauthorized("invalid or expired token")
 	}
+	userID, err := claims.UserID()
+	if err != nil {
+		return nil, apierr.Unauthorized("invalid token subject")
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		if repository.IsNotFound(err) {
+			return nil, apierr.Unauthorized("account no longer exists")
+		}
+		return nil, err
+	}
+	if user.Status != "active" {
+		return nil, apierr.Forbidden("account is disabled")
+	}
+	claims.Roles = []string(user.Roles)
 	return claims, nil
+}
+
+// Logout revokes the presented refresh token. Invalid/missing tokens are an
+// idempotent success; access JWTs expire naturally and must be dropped by clients.
+func (s *AuthService) Logout(ctx context.Context, token string) error {
+	if token == "" {
+		return nil
+	}
+	if _, err := s.issuer.Verify(token, auth.RefreshToken); err != nil {
+		return nil
+	}
+	return s.users.RevokeSession(ctx, tokenHash(token))
+}
+
+func (s *AuthService) CleanupSessions(ctx context.Context) error {
+	return s.users.CleanupSessions(ctx, 1000)
+}
+
+func (s *AuthService) session(token string, userID uint) (model.RefreshSession, error) {
+	claims, err := s.issuer.Verify(token, auth.RefreshToken)
+	if err != nil {
+		return model.RefreshSession{}, apierr.Wrap(apierr.CodeInternal, "could not create session", err)
+	}
+	return model.RefreshSession{TokenHash: tokenHash(token), UserID: userID, ExpiresAt: claims.ExpiresAt.UTC()}, nil
+}
+
+func tokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // dummyHash keeps the failure path of a login attempt as expensive as the
 // success path, so response timing cannot be used to enumerate accounts.
 const dummyHash = "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
-
-func comparePassword(hash, password string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
-}
 
 // UserService exposes account reads.
 type UserService struct {
@@ -505,20 +572,18 @@ func validStatus(status string) bool {
 // isNumeric accepts plain decimal strings, which is what the API documents for
 // price fields. Storing money as text keeps the client free of float drift.
 func isNumeric(value string) bool {
-	if value == "" {
+	parts := strings.Split(value, ".")
+	if len(parts) > 2 || parts[0] == "" {
 		return false
 	}
-	dots := 0
-	for index := 0; index < len(value); index++ {
-		switch char := value[index]; {
-		case char >= '0' && char <= '9':
-		case char == '.':
-			dots++
-			if dots > 1 {
+	if len(parts) == 2 && (parts[1] == "" || len(parts[1]) > 2) {
+		return false
+	}
+	for _, part := range parts {
+		for _, char := range part {
+			if char < '0' || char > '9' {
 				return false
 			}
-		default:
-			return false
 		}
 	}
 	return true
@@ -539,6 +604,18 @@ func NewFavoriteService(products *repository.ProductRepository, favorites *repos
 	return &FavoriteService{products: products, favorites: favorites}
 }
 
+// Status only exposes bookmarks for a publicly visible product.
+func (s *FavoriteService) Status(ctx context.Context, userID, productID uint) (FavoriteResult, error) {
+	if _, err := s.products.FindPublicByID(ctx, productID); err != nil {
+		return FavoriteResult{}, err
+	}
+	favorite, err := s.favorites.Has(ctx, userID, productID)
+	if err != nil {
+		return FavoriteResult{}, err
+	}
+	return FavoriteResult{ProductID: productID, Favorite: favorite}, nil
+}
+
 // Set toggles a bookmark, verifying the product exists and is visible first.
 func (s *FavoriteService) Set(ctx context.Context, userID, productID uint, favorite bool) (FavoriteResult, error) {
 	// Reject bookmarks for products the caller could not see anyway.
@@ -554,32 +631,9 @@ func (s *FavoriteService) Set(ctx context.Context, userID, productID uint, favor
 
 // List returns the bookmarked products of a user, newest first.
 func (s *FavoriteService) List(ctx context.Context, userID uint, page, pageSize int) (Page[model.Product], error) {
-	ids, err := s.favorites.ListProductIDs(ctx, userID)
+	items, total, err := s.favorites.ListProducts(ctx, userID, page, pageSize)
 	if err != nil {
 		return Page[model.Product]{}, err
 	}
-	total := int64(len(ids))
-	start := (page - 1) * pageSize
-	if start > len(ids) {
-		return NewPage([]model.Product{}, total, page, pageSize), nil
-	}
-	end := start + pageSize
-	if end > len(ids) {
-		end = len(ids)
-	}
-
-	items := make([]model.Product, 0, end-start)
-	for _, id := range ids[start:end] {
-		product, err := s.products.FindByID(ctx, id)
-		if err != nil {
-			// A bookmark pointing at a soft-deleted product is stale; skip it
-			// instead of failing the whole page.
-			continue
-		}
-		items = append(items, product)
-	}
 	return NewPage(items, total, page, pageSize), nil
 }
-
-// TimeNow is a seam so that tests can freeze time without touching the clock.
-var TimeNow = time.Now

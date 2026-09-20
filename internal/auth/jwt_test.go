@@ -42,8 +42,7 @@ func TestIssueProducesUsableAccessToken(t *testing.T) {
 	assert.Equal(t, "user", claims.Username)
 	assert.Equal(t, "测试用户", claims.RealName)
 	assert.Equal(t, AccessToken, claims.Type)
-	assert.True(t, claims.HasRole("admin"))
-	assert.False(t, claims.HasRole("root"))
+	assert.Equal(t, []string{"user", "admin"}, claims.Roles)
 }
 
 func TestRefreshTokenIsNotAcceptedAsAccessToken(t *testing.T) {

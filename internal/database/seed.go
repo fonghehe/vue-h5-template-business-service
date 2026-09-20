@@ -21,6 +21,17 @@ const DemoPassword = "123456"
 // seeding is skipped for tables that already contain rows, which makes the
 // operation safe to run on every boot.
 func Seed(db *gorm.DB) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if tx.Name() == "postgres" {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(current_database() || ':' || current_schema() || ':business-seed',0))").Error; err != nil {
+				return err
+			}
+		}
+		return seed(tx)
+	})
+}
+
+func seed(db *gorm.DB) error {
 	if err := seedUsers(db); err != nil {
 		return fmt.Errorf("seed users: %w", err)
 	}
@@ -64,17 +75,18 @@ func seedProducts(db *gorm.DB) error {
 		return nil
 	}
 
-	for index := range demoProducts {
-		demoProducts[index].Name = demoProducts[index].Title
-		demoProducts[index].Cover = demoProducts[index].ImgURL
-		demoProducts[index].CategoryID = "general"
-		demoProducts[index].Brand = demoProducts[index].ShopName
-		demoProducts[index].SearchText = searchText(demoProducts[index])
-		if demoProducts[index].Status == "" {
-			demoProducts[index].Status = model.StatusOnSale
+	products := append([]model.Product(nil), demoProducts...)
+	for index := range products {
+		products[index].Name = products[index].Title
+		products[index].Cover = products[index].ImgURL
+		products[index].CategoryID = "general"
+		products[index].Brand = products[index].ShopName
+		products[index].SearchText = searchText(products[index])
+		if products[index].Status == "" {
+			products[index].Status = model.StatusOnSale
 		}
 	}
-	return db.CreateInBatches(demoProducts, 50).Error
+	return db.CreateInBatches(products, 50).Error
 }
 
 func seedCommerce(db *gorm.DB) error {

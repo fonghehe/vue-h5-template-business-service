@@ -67,3 +67,16 @@ pnpm docs:dev
 ```
 
 文書は `/`、`/zh/`、`/ja/` に対応し、ページと sidebar を一緒に更新します。VitePress の内蔵ローカル検索・コードハイライトを使用し、Mermaid 専用レンダラーはありません。図がコードブロックになることに依存せず、表と文章で構造を記してください。
+
+## 追加機能の回帰テスト
+
+`internal/httpapi/favorite_status_test.go` はユーザー分離、バージョン付きパス、解除後の取得、認証、不正・非公開商品、真偽値の検証を確認します。`internal/service/favorite_test.go` は一覧のページ分割とクエリ回数を検証します。SQLite はローカルのルール確認用です。実 PostgreSQL の統合テストには `TEST_DATABASE_URL` が必要で、結果を分けて扱います。
+
+```bash
+go test ./internal/httpapi -run 'TestFavorite'
+go test ./internal/service -run 'TestFavorites'
+go test -race ./...
+go vet ./...
+```
+
+[API](./api.md)

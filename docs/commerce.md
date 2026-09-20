@@ -37,6 +37,7 @@ Replace `skuId` with the SKU returned by the detail endpoint. `couponCode` is op
 
 ```text
 BEGIN
+  lock the cart owner; recheck the idempotency key
   read current cart; reject empty or >100 items
   lock/reload each SKU in stable SKU-ID order; calculate integer-cent total
   lock/validate coupon and usage limits
@@ -47,6 +48,8 @@ COMMIT (any error rolls back all writes)
 ```
 
 Snapshots contain `productName`, `skuName`, `unitPrice`, `quantity`; later catalogue edits do not rewrite history. `payableAmount = originalAmount - discountAmount` is computed on the server. The database unique index `(user_id, idempotency_key)` is the final duplicate-order barrier; Redis is not involved in correctness. A retry after a network timeout returns the committed order without another inventory or coupon reservation.
+
+All cart mutations use the same account lock as checkout. Different concurrent keys cannot consume the same cart twice; writes queued behind checkout survive its cart clear. The same key replays the original order even if the cart has since changed.
 
 ## Stock invariant and state machine
 
@@ -68,9 +71,13 @@ Snapshots contain `productName`, `skuName`, `unitPrice`, `quantity`; later catal
 
 The test `TestPaymentWebhookIsIdempotent` in `internal/service/payment_test.go` shows the real signing API (`provider.Sign(callback)`) and sends the same callback ten times. The durable `(provider, event_id)` unique constraint plus payload hash means an identical replay is harmless; reusing an event ID with different content returns `409`. A failure event marks the payment attempt failed but leaves the order pending for retry, cancellation or expiration. This is a **mock** callback endpoint; connect a real provider only after implementing its signature, event semantics and reconciliation rules.
 
+Callbacks lock the order before the payment and check the expiry against the time after both locks are acquired. Verified success notifications with a new event ID are also harmless when payment already succeeded and the order is `PAID`, `PROCESSING` or `COMPLETED`; they do not repeat inventory changes or regress fulfillment.
+
 ## Expiration and multi-instance behaviour
 
 `cmd/server/main.go` starts the order-expiration goroutine. Every `ORDER_EXPIRATION_INTERVAL`, it selects expired pending orders in batches. PostgreSQL `FOR UPDATE SKIP LOCKED` makes multiple instances claim different rows. For each claimed order, one transaction changes status to `EXPIRED`, releases all reserved stock and coupon usage, and appends history. A concurrent cancellation or successful payment cannot release the same reservation twice. The worker stops during graceful shutdown.
+
+Each pass attempts at most `ORDER_EXPIRATION_BATCH_SIZE` orders. A failed order is rolled back and excluded from the remainder of that pass; its error is reported and other orders still commit. The next pass retries it. Inventory rows are visited in stable SKU-ID order, and locks are not retained across orders.
 
 ## Test the guarantees
 
@@ -80,3 +87,5 @@ go test -race ./...
 ```
 
 The SQLite tests cover rule-level rollback, coupons, idempotency, webhook replay and state transitions. The PostgreSQL concurrency tests require `TEST_DATABASE_URL`; CI supplies it. `TestPostgresConcurrentOrdersNeverOversell` uses 100 users, 100 carts and stock 10, then checks that exactly 10 orders commit and stock never goes negative. See [Development](/development) for the test setup and [Deployment](/deployment) for operational limits.
+
+Additional regression tests cover same-cart concurrent checkouts, cart additions during checkout, payment expiry after lock waits, failure isolation during expiration, and pool cleanup after failed database initialization.

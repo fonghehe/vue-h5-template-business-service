@@ -19,17 +19,23 @@ curl http://localhost:8002/ready
 curl 'http://localhost:8002/api/product/list?page=1&pageSize=10'
 ```
 
-同梱の Compose 設定は API、PostgreSQL、Redis を**開発専用**の認証情報とシードデータで起動します。Go プロセスを直接実行する場合は環境変数を明示的に設定してください。`.env` は自動で読み込まれません。使用可能なデータベース URL とコマンドは[クイックスタート](https://fonghehe.github.io/vue-h5-template-business-service/ja/quickstart)を参照してください。
+同梱の Compose 設定は API、PostgreSQL、Redis を**開発専用**の認証情報とシードデータで起動します。ソースから開発する場合は `.env.example` をプロジェクト直下の `.env` にコピーしてください。サーバーが自動で読み込み、既存のプロセス環境変数が優先されます。使用可能なデータベース URL とコマンドは[クイックスタート](https://fonghehe.github.io/vue-h5-template-business-service/ja/quickstart)を参照してください。
 
 Compose の `business` サービスを起動せず、ソースから API を実行する場合：
 
 ```bash
-POSTGRES_PORT=5433 docker compose up -d postgres
-export DATABASE_URL='postgres://vue_h5:vue_h5_local@127.0.0.1:5433/vue_h5_business?sslmode=disable'
+cp .env.example .env # 初回のみ。専用 DB の DATABASE_URL を設定
+POSTGRES_PORT=5433 docker compose up -d --wait postgres # 必要な場合のみ
 go run ./cmd/server
 ```
 
-接続先を指定しない Go コマンドは既定の `localhost:5432` を使い、別アプリのデータベースに接続する可能性があります。起動のためにそのデータベースを移行・削除しないでください。
+サンプル `.env` はポート 5433 の専用開発 DB を使います。ローカル PostgreSQL が利用できる場合は `.env` の `DATABASE_URL` を専用 DB に設定し、Compose の起動を省略できます。`.env` も明示的な `DATABASE_URL` もない場合は既定の `localhost:5432` を使い、別アプリの DB に接続する可能性があります。起動のためにそのデータベースを移行・削除しないでください。
+
+## 対話型 API ドキュメント
+
+開発環境の Swagger UI は [http://localhost:8002/swagger/index.html](http://localhost:8002/swagger/index.html) から開けます。現在の OpenAPI 契約は `/openapi.yaml` です。ページは `github.com/swaggo/gin-swagger` で登録し、リソースは `github.com/swaggo/files` が提供します。別のドキュメントサーバーや CDN は不要です。既存の OpenAPI 3 契約を読み込むため、`swag init` で Swagger 2 文書を生成する必要はありません。`APP_ENV=production` ではこれらのルートを登録しません。
+
+`POST /api/auth/login` で開発アカウント `user` / `123456` を使ってログインし、`data.accessToken` を **Authorize** に入力してください。管理 API は `admin` / `123456` を使います。決済はモックで、実際の課金は発生しません。
 
 ## チェック
 
@@ -52,3 +58,7 @@ PostgreSQL での「100 人が在庫 10 件を同時購入する」テストに�
 ## ライセンス
 
 [MIT](./LICENSE)
+
+## アーキテクチャと本番運用
+
+`Handler → Service → Repository → PostgreSQL` を維持し、明示的 HTTP DTO で契約を固定します。`make migrate` は順序移行、`make migrate-status` は適用状態を表示し、HTTP や seed を開始しません。staging/production は `AUTO_MIGRATE=false` が既定で、レプリカ開始前に移行します。独立 `compose.production.yml` は外部の専用 DB を利用します。[本番動作とアップグレード](docs/ja/production.md)を確認してください。更新セッションは単一使用とログアウト失効に対応し、旧 Refresh JWT は再ログインが必要です。

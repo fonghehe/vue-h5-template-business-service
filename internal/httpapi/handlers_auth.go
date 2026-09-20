@@ -22,19 +22,19 @@ type refreshRequest struct {
 // POST /api/auth/login
 func (s *Server) login(c *gin.Context) {
 	var input loginRequest
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("username and password are required"))
 		return
 	}
 
-	result, pair, err := s.services.Auth.Login(c.Request.Context(), input.Username, input.Password, true)
+	result, pair, err := s.auth.Login(c.Request.Context(), input.Username, input.Password, true)
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
 
 	middleware.SetRefreshCookie(c, s.config, pair.RefreshToken, int(s.config.RefreshTokenTTL.Seconds()))
-	response.OK(c, result)
+	response.OK(c, toLogin(result))
 }
 
 // refresh rotates an expired access token using the HttpOnly refresh cookie, or
@@ -44,7 +44,10 @@ func (s *Server) login(c *gin.Context) {
 func (s *Server) refresh(c *gin.Context) {
 	var body refreshRequest
 	// The body is optional: browsers rely on the cookie alone.
-	_ = c.ShouldBindJSON(&body)
+	if err := bindJSON(c, &body, true, "invalid refresh payload"); err != nil {
+		response.Fail(c, err)
+		return
+	}
 
 	token := body.RefreshToken
 	if token == "" {
@@ -56,7 +59,7 @@ func (s *Server) refresh(c *gin.Context) {
 		token = cookie
 	}
 
-	result, pair, err := s.services.Auth.Refresh(c.Request.Context(), token)
+	result, pair, err := s.auth.Refresh(c.Request.Context(), token)
 	if err != nil {
 		middleware.ClearRefreshCookie(c, s.config)
 		response.Fail(c, err)
@@ -64,14 +67,28 @@ func (s *Server) refresh(c *gin.Context) {
 	}
 
 	middleware.SetRefreshCookie(c, s.config, pair.RefreshToken, int(s.config.RefreshTokenTTL.Seconds()))
-	response.OK(c, result)
+	response.OK(c, toLogin(result))
 }
 
-// logout clears the refresh cookie. Access tokens are stateless, so revocation
-// happens by dropping them client side.
+// logout revokes the refresh session and clears its cookie. Clients must also
+// discard stateless access tokens, which remain valid until expiry.
 //
 // POST /api/auth/logout
 func (s *Server) logout(c *gin.Context) {
+	var body refreshRequest
+	if err := bindJSON(c, &body, true, "invalid logout payload"); err != nil {
+		response.Fail(c, err)
+		return
+	}
+	token := body.RefreshToken
+	if token == "" {
+		token, _ = c.Cookie(s.config.RefreshCookieName)
+	}
+	if err := s.auth.Logout(c.Request.Context(), token); err != nil {
+		response.Fail(c, err)
+		return
+	}
+
 	middleware.ClearRefreshCookie(c, s.config)
 	response.OK(c, nil)
 }
@@ -85,7 +102,7 @@ func (s *Server) userInfo(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, user)
+	response.OK(c, toUser(user))
 }
 
 // listFavorites returns the bookmarked products of the authenticated user.
@@ -98,5 +115,5 @@ func (s *Server) listFavorites(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, result)
+	response.OK(c, mapPage(result, toProduct))
 }

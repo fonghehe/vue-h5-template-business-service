@@ -1,5 +1,7 @@
 # 部署指南
 
+服务以 `CGO_ENABLED=0` 编译，容器使用 PostgreSQL。SQLite 隔离测试在容器外启用 CGO 运行。
+
 ## 构建镜像
 
 镜像采用多阶段构建，以**非 root** 用户运行，并在编译期注入版本号。
@@ -31,7 +33,6 @@ docker compose up -d --build
 - **锁定 `CORS_ORIGINS`** 为真实前端域名。生产启动会拒绝 `*` 与回环源。
 - **使用 JSON 日志**（`LOG_FORMAT=json`）并接入采集器。
 - **关闭演示数据**（`SEED=false`）；生产会拒绝 `true`。真实用户/优惠券需通过经批准的运维流程准备；当前没有公开注册或优惠券管理接口。
-- **协调迁移**：`AUTO_MIGRATE=true` 在启动时执行有记录的迁移。多副本应指定一个迁移执行者或提前迁移。旧 Product 即使关闭 Seed 也会经数据迁移获得默认 SKU/库存。
 - **PostgreSQL 是数据真相**。Redis 仅是可选目录缓存；实例内按 IP 限流不会跨副本共享，多副本请在边缘配置共享限流。
 - **按需限制 `/metrics`**：路由无 JWT；它提供 HTTP 数量/耗时、订单创建/支付/过期和库存预占失败指标。
 - **支付只是 Mock**：HMAC 回调不能结算真实资金；接入真实渠道需重新设计验签、事件语义和对账。
@@ -47,3 +48,5 @@ docker compose up -d --build
 
 GitHub Actions 在每个 PR 与 `main` 的 push 上运行：格式检查、`go vet`、`go test -race` 及覆盖率、
 `golangci-lint`，以及使用 PostgreSQL service 容器的并发测试和 Docker 镜像构建。独立的 `deploy-docs.yml` 使用 pnpm 校验配置、构建三语 VitePress 并上传 GitHub Pages；构建成功不等于 Pages 已启用或公网可访问。
+
+部署配置与迁移/刷新会话升级见[生产行为](/zh/production)。支持本地 `local`，`staging` 采用生产安全校验。`AUTO_MIGRATE` 在 staging/production 默认 false，其他环境默认 true。`DB_CONN_MAX_IDLE_TIME` 默认 5m；`REQUEST_TIMEOUT` 默认 10s，必须小于 `WRITE_TIMEOUT`。

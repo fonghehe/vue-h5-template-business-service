@@ -21,8 +21,8 @@ const (
 )
 
 type favoriteRequest struct {
-	ProductID uint `json:"productId" binding:"required"`
-	Favorite  bool `json:"favorite"`
+	ProductID uint  `json:"productId" binding:"required"`
+	Favorite  *bool `json:"favorite" binding:"required"`
 }
 
 // listProducts returns one page of the public catalogue.
@@ -57,7 +57,7 @@ func (s *Server) listProducts(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, result)
+	response.OK(c, mapPage(result, toProduct))
 }
 
 // productDetail returns a single on-sale product.
@@ -74,7 +74,22 @@ func (s *Server) productDetail(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, product)
+	response.OK(c, toProduct(product))
+}
+
+// favoriteStatus returns the authenticated user's bookmark state.
+func (s *Server) favoriteStatus(c *gin.Context) {
+	id, err := pathID(c.Query("id"))
+	if err != nil {
+		response.Fail(c, apierr.Validation("id must be a positive integer"))
+		return
+	}
+	result, err := s.services.Favorites.Status(c.Request.Context(), middleware.CurrentUserID(c), id)
+	if err != nil {
+		response.Fail(c, err)
+		return
+	}
+	response.OK(c, result)
 }
 
 // toggleFavorite bookmarks or unbookmarks a product.
@@ -82,11 +97,11 @@ func (s *Server) productDetail(c *gin.Context) {
 // POST /api/product/favorite
 func (s *Server) toggleFavorite(c *gin.Context) {
 	var input favoriteRequest
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("productId is required"))
 		return
 	}
-	result, err := s.services.Favorites.Set(c.Request.Context(), middleware.CurrentUserID(c), input.ProductID, input.Favorite)
+	result, err := s.services.Favorites.Set(c.Request.Context(), middleware.CurrentUserID(c), input.ProductID, *input.Favorite)
 	if err != nil {
 		response.Fail(c, err)
 		return
@@ -117,7 +132,7 @@ func (s *Server) adminListProducts(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, result)
+	response.OK(c, mapPage(result, toProduct))
 }
 
 // adminGetProduct returns a product regardless of status.
@@ -134,7 +149,7 @@ func (s *Server) adminGetProduct(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, product)
+	response.OK(c, toProduct(product))
 }
 
 // adminCreateProduct adds a product to the catalogue.
@@ -142,7 +157,7 @@ func (s *Server) adminGetProduct(c *gin.Context) {
 // POST /api/admin/products
 func (s *Server) adminCreateProduct(c *gin.Context) {
 	var input productPayload
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("invalid product payload"))
 		return
 	}
@@ -151,7 +166,7 @@ func (s *Server) adminCreateProduct(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.Created(c, product)
+	response.Created(c, toProduct(product))
 }
 
 // adminUpdateProduct partially updates a product.
@@ -165,23 +180,16 @@ func (s *Server) adminUpdateProduct(c *gin.Context) {
 	}
 
 	var input productPayload
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("invalid product payload"))
 		return
 	}
-	// A partial update must not blank out fields the operator did not send, so
-	// missing values are filled from the stored record first.
-	existing, err := s.services.Products.AdminDetail(c.Request.Context(), id)
+	product, err := s.services.Products.Patch(c.Request.Context(), id, input.toPatch())
 	if err != nil {
 		response.Fail(c, err)
 		return
 	}
-	product, err := s.services.Products.Update(c.Request.Context(), id, input.mergeInto(existing))
-	if err != nil {
-		response.Fail(c, err)
-		return
-	}
-	response.OK(c, product)
+	response.OK(c, toProduct(product))
 }
 
 // adminDeleteProduct soft-removes a product.
@@ -243,56 +251,24 @@ func (p productPayload) toService() service.ProductInput {
 	}
 }
 
-// mergeInto fills omitted fields from an existing product so that PATCH only
-// changes what was actually sent.
-func (p productPayload) mergeInto(existing model.Product) service.ProductInput {
-	input := p.toService()
-	if p.Name == nil {
-		input.Name = existing.Name
+func (p productPayload) toPatch() service.ProductPatchInput {
+	return service.ProductPatchInput{
+		Name:        p.Name,
+		CategoryID:  p.CategoryID,
+		Brand:       p.Brand,
+		Cover:       p.Cover,
+		Title:       p.Title,
+		ImgURL:      p.ImgURL,
+		Price:       p.Price,
+		VipPrice:    p.VipPrice,
+		ShopDesc:    p.ShopDesc,
+		Delivery:    p.Delivery,
+		ShopName:    p.ShopName,
+		Description: p.Description,
+		Stock:       p.Stock,
+		Status:      p.Status,
+		Featured:    p.Featured,
 	}
-	if p.CategoryID == nil {
-		input.CategoryID = existing.CategoryID
-	}
-	if p.Brand == nil {
-		input.Brand = existing.Brand
-	}
-	if p.Cover == nil {
-		input.Cover = existing.Cover
-	}
-	if p.Title == nil {
-		input.Title = existing.Title
-	}
-	if p.ImgURL == nil {
-		input.ImgURL = existing.ImgURL
-	}
-	if p.Price == nil {
-		input.Price = existing.Price
-	}
-	if p.VipPrice == nil {
-		input.VipPrice = existing.VipPrice
-	}
-	if p.ShopDesc == nil {
-		input.ShopDesc = existing.ShopDesc
-	}
-	if p.Delivery == nil {
-		input.Delivery = existing.Delivery
-	}
-	if p.ShopName == nil {
-		input.ShopName = existing.ShopName
-	}
-	if p.Description == nil {
-		input.Description = existing.Description
-	}
-	if p.Stock == nil {
-		input.Stock = existing.Stock
-	}
-	if p.Status == nil {
-		input.Status = existing.Status
-	}
-	if p.Featured == nil {
-		input.Featured = existing.Featured
-	}
-	return input
 }
 
 func derefString(value *string) string {
@@ -340,7 +316,7 @@ func (s *Server) adminCreateSKU(c *gin.Context) {
 		return
 	}
 	var input skuPayload
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("invalid SKU payload"))
 		return
 	}
@@ -349,7 +325,7 @@ func (s *Server) adminCreateSKU(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.Created(c, sku)
+	response.Created(c, toProductSKU(sku))
 }
 
 func (s *Server) adminUpdateSKU(c *gin.Context) {
@@ -359,7 +335,7 @@ func (s *Server) adminUpdateSKU(c *gin.Context) {
 		return
 	}
 	var input skuPayload
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("invalid SKU payload"))
 		return
 	}
@@ -368,5 +344,5 @@ func (s *Server) adminUpdateSKU(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, sku)
+	response.OK(c, toProductSKU(sku))
 }

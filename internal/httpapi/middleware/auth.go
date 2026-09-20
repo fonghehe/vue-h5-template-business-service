@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -25,7 +26,7 @@ func Authenticate(service TokenVerifier) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		claims, err := service.VerifyAccessToken(token)
+		claims, err := service.VerifyAccessToken(c.Request.Context(), token)
 		if err != nil {
 			response.Fail(c, err)
 			c.Abort()
@@ -39,8 +40,6 @@ func Authenticate(service TokenVerifier) gin.HandlerFunc {
 		}
 
 		c.Set(response.ContextKeyUserID, userID)
-		c.Request = c.Request.WithContext(response.WithUserID(c.Request.Context(), userID))
-		c.Set(response.ContextKeyUsername, claims.Username)
 		c.Set(response.ContextKeyRoles, claims.Roles)
 		c.Next()
 	}
@@ -50,7 +49,7 @@ func Authenticate(service TokenVerifier) gin.HandlerFunc {
 // Depending on an interface (rather than the concrete service) keeps the
 // transport layer unit-testable without a database.
 type TokenVerifier interface {
-	VerifyAccessToken(token string) (*auth.Claims, error)
+	VerifyAccessToken(context.Context, string) (*auth.Claims, error)
 }
 
 // RequireRole rejects callers that do not carry the given role. It must be
@@ -89,7 +88,11 @@ func CurrentUserID(c *gin.Context) uint {
 // auth routes, so browser JavaScript can never read it.
 func SetRefreshCookie(c *gin.Context, cfg config.Config, token string, maxAge int) {
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie(cfg.RefreshCookieName, token, maxAge, "/api/auth", "", cfg.RefreshCookieSecure, true)
+	path := "/api/auth"
+	if strings.HasPrefix(c.Request.URL.Path, "/api/v1/") {
+		path = "/api/v1/auth"
+	}
+	c.SetCookie(cfg.RefreshCookieName, token, maxAge, path, "", cfg.RefreshCookieSecure, true)
 }
 
 // ClearRefreshCookie expires the refresh cookie.

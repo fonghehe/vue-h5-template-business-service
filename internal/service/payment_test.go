@@ -166,3 +166,32 @@ func TestPaymentIntentCannotBeCreatedAfterOrderExpires(t *testing.T) {
 	require.ErrorAs(t, err, &apiError)
 	assert.Equal(t, apierr.CodeConflict, apiError.Code)
 }
+
+func TestPaymentSuccessReplayAfterFulfillmentDoesNotRegressOrder(t *testing.T) {
+	fixture := newCommerceFixture(t)
+	ctx := context.Background()
+	_, err := fixture.services.Cart.Add(ctx, fixture.userID, fixture.skuID, 1)
+	require.NoError(t, err)
+	order, _, err := fixture.services.Orders.Create(ctx, fixture.userID, "fulfilled-payment", CreateOrderInput{})
+	require.NoError(t, err)
+	payment, err := fixture.services.Payments.Create(ctx, fixture.userID, order.ID)
+	require.NoError(t, err)
+	provider := fixture.services.Payments.provider.(*MockPaymentProvider)
+	callback := PaymentCallback{EventID: "paid-event", OrderNo: order.OrderNo, Reference: payment.Reference,
+		Amount: order.PayableAmount, Status: PaymentCallbackSuccess}
+	_, _, err = fixture.services.Payments.HandleWebhook(ctx, callback, provider.Sign(callback))
+	require.NoError(t, err)
+	for _, status := range []string{model.OrderProcessing, model.OrderCompleted} {
+		_, err = fixture.services.Orders.Advance(ctx, order.ID, status)
+		require.NoError(t, err)
+		callback.EventID = "repeated-success-" + status
+		result, duplicate, err := fixture.services.Payments.HandleWebhook(ctx, callback, provider.Sign(callback))
+		require.NoError(t, err)
+		assert.True(t, duplicate)
+		assert.Equal(t, status, result.Status)
+	}
+	inventory, err := fixture.repo.Inventory(ctx, fixture.skuID)
+	require.NoError(t, err)
+	assert.Zero(t, inventory.Reserved)
+	assert.Equal(t, fixture.inventory.Available-1, inventory.Available)
+}

@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"io"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -27,12 +26,16 @@ func (s *Server) getCart(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, gin.H{"items": items})
+	result := make([]CartItemDTO, len(items))
+	for i, v := range items {
+		result[i] = toCartItem(v)
+	}
+	response.OK(c, gin.H{"items": result})
 }
 
 func (s *Server) addCartItem(c *gin.Context) {
 	var input cartItemRequest
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("skuId and quantity are required; quantity must be between 1 and 99"))
 		return
 	}
@@ -41,7 +44,7 @@ func (s *Server) addCartItem(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.Created(c, item)
+	response.Created(c, toCartItem(item))
 }
 
 func (s *Server) updateCartItem(c *gin.Context) {
@@ -51,7 +54,7 @@ func (s *Server) updateCartItem(c *gin.Context) {
 		return
 	}
 	var input cartQuantityRequest
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("quantity must be between 1 and 99"))
 		return
 	}
@@ -60,7 +63,7 @@ func (s *Server) updateCartItem(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, item)
+	response.OK(c, toCartItem(item))
 }
 
 func (s *Server) deleteCartItem(c *gin.Context) {
@@ -90,12 +93,11 @@ type createOrderRequest struct {
 
 func (s *Server) createOrder(c *gin.Context) {
 	var input createOrderRequest
-	if c.Request.ContentLength != 0 {
-		if err := c.ShouldBindJSON(&input); err != nil && err != io.EOF {
-			response.Fail(c, apierr.Validation("invalid order payload"))
-			return
-		}
+	if err := bindJSON(c, &input, true, "invalid order payload"); err != nil {
+		response.Fail(c, err)
+		return
 	}
+
 	order, replayed, err := s.services.Orders.Create(c.Request.Context(), middleware.CurrentUserID(c),
 		c.GetHeader("Idempotency-Key"), service.CreateOrderInput{CouponCode: strings.TrimSpace(input.CouponCode)})
 	if err != nil {
@@ -103,10 +105,10 @@ func (s *Server) createOrder(c *gin.Context) {
 		return
 	}
 	if replayed {
-		response.OK(c, order)
+		response.OK(c, toOrder(order))
 		return
 	}
-	response.Created(c, order)
+	response.Created(c, toOrder(order))
 }
 
 func (s *Server) listOrders(c *gin.Context) {
@@ -116,7 +118,7 @@ func (s *Server) listOrders(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, orders)
+	response.OK(c, mapPage(orders, toOrder))
 }
 
 func (s *Server) getOrder(c *gin.Context) {
@@ -130,7 +132,7 @@ func (s *Server) getOrder(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, order)
+	response.OK(c, toOrder(order))
 }
 
 func (s *Server) cancelOrder(c *gin.Context) {
@@ -144,7 +146,7 @@ func (s *Server) cancelOrder(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, order)
+	response.OK(c, toOrder(order))
 }
 
 func (s *Server) createPayment(c *gin.Context) {
@@ -158,12 +160,12 @@ func (s *Server) createPayment(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.Created(c, payment)
+	response.Created(c, toPayment(payment))
 }
 
 func (s *Server) mockPaymentWebhook(c *gin.Context) {
 	var callback service.PaymentCallback
-	if err := c.ShouldBindJSON(&callback); err != nil {
+	if err := bindJSON(c, &callback, false, "Invalid payment callback"); err != nil {
 		response.Fail(c, apierr.Validation("invalid payment callback"))
 		return
 	}
@@ -172,7 +174,7 @@ func (s *Server) mockPaymentWebhook(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, gin.H{"order": order, "duplicate": duplicate})
+	response.OK(c, gin.H{"order": toOrder(order), "duplicate": duplicate})
 }
 
 type orderStatusRequest struct {
@@ -186,7 +188,7 @@ func (s *Server) adminAdvanceOrder(c *gin.Context) {
 		return
 	}
 	var input orderStatusRequest
-	if err := c.ShouldBindJSON(&input); err != nil {
+	if err := bindJSON(c, &input, false, "Invalid request payload"); err != nil {
 		response.Fail(c, apierr.Validation("status must be PROCESSING or COMPLETED"))
 		return
 	}
@@ -195,5 +197,5 @@ func (s *Server) adminAdvanceOrder(c *gin.Context) {
 		response.Fail(c, err)
 		return
 	}
-	response.OK(c, order)
+	response.OK(c, toOrder(order))
 }

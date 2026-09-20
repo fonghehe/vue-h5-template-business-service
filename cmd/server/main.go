@@ -32,25 +32,24 @@ func main() {
 }
 
 func run() error {
+	if err := config.LoadDotEnv(".env"); err != nil {
+		return err
+	}
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	logger := logging.New(cfg.LogLevel, cfg.LogFormat)
+	logger := logging.New(cfg.LogLevel, cfg.LogFormat).With("service", "business", "environment", cfg.AppEnv)
 	slog.SetDefault(logger)
 
-	db, err := database.Open(database.OptionsFromConfig(cfg))
+	opts := database.OptionsFromConfig(cfg)
+	opts.Logger = logging.NewDatabaseLogger(logger)
+	db, err := database.Open(opts)
 	if err != nil {
 		return err
 	}
 
-	server := httpapi.New(cfg, db, logger)
-	defer func() {
-		if closeErr := server.Close(); closeErr != nil {
-			logger.Error("cache close failed", "error", closeErr)
-		}
-	}()
 	sqlDB, err := db.DB()
 	if err != nil {
 		return fmt.Errorf("access database pool: %w", err)
@@ -58,6 +57,12 @@ func run() error {
 	defer func() {
 		if closeErr := sqlDB.Close(); closeErr != nil {
 			logger.Error("database pool close failed", "error", closeErr)
+		}
+	}()
+	server := httpapi.New(cfg, db, logger)
+	defer func() {
+		if closeErr := server.Close(); closeErr != nil {
+			logger.Error("cache close failed", "error", closeErr)
 		}
 	}()
 	workerCtx, stopWorkers := context.WithCancel(context.Background())
@@ -91,6 +96,7 @@ func run() error {
 
 	shutdown := make(chan os.Signal, 1)
 	signal.Notify(shutdown, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(shutdown)
 
 	select {
 	case err := <-serverErrors:

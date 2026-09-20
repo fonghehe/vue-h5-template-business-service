@@ -28,15 +28,22 @@ docker compose ps
 ## Option B — run from source
 
 ```bash
-# Start only PostgreSQL; this host port avoids an existing local 5432 server.
-POSTGRES_PORT=5433 docker compose up -d postgres
-export DATABASE_URL='postgres://vue_h5:vue_h5_local@127.0.0.1:5433/vue_h5_business?sslmode=disable'
+# Copy once, then configure the dedicated database in the project file.
+cp .env.example .env
+# Optional: provide PostgreSQL through Compose if no local database is available.
+POSTGRES_PORT=5433 docker compose up -d --wait postgres
 go run ./cmd/server
 ```
 
-`make run` invokes the same Go command. Do not start the Compose `business` service at the same time: it also binds host port 8002. The Go process does **not** load `.env`; export variables in your shell or use an env-file tool. `.env.example` contains the development credentials for port 5432; change its port when using the command above. Redis is optional for a native API run (`REDIS_URL` defaults to empty). If the default Go module proxy times out, run `GOPROXY=https://goproxy.cn go mod download` before starting; keep the repository's `go.sum` verification enabled. See [Configuration](/configuration).
+`make run` invokes the same Go command. Do not start the Compose `business` service at the same time: it also binds host port 8002. The server automatically reads `.env` from the working directory; run from the repository root. Existing process variables take precedence. `.env.example` uses port 5433. If PostgreSQL is already installed, set `DATABASE_URL` in `.env` to a dedicated database and skip the Compose command. Redis is optional for a native API run (`REDIS_URL` defaults to empty). If the default Go module proxy times out, run `GOPROXY=https://goproxy.cn go mod download` before starting; keep the repository's `go.sum` verification enabled. See [Configuration](/configuration).
 
-Running `go run ./cmd/server` without `DATABASE_URL` targets the default `localhost:5432`, which may be a different application's database. Do **not** migrate or delete its tables to make this service start. Use the dedicated Compose database and exported URL above. Startup now rejects incompatible `users`/`products` schemas before applying migrations.
+Without `.env` or an explicit `DATABASE_URL`, running `go run ./cmd/server` targets the default `localhost:5432`, which may be a different application's database. Do **not** migrate or delete its tables to make this service start. Use a dedicated database and configure its URL in the project `.env`. Startup now rejects incompatible `users`/`products` schemas before applying migrations.
+
+## Interactive API documentation
+
+Swagger UI is available at `http://localhost:8002/swagger/index.html`. The current OpenAPI contract is served at `/openapi.yaml`. The page is registered with `github.com/swaggo/gin-swagger`, and `github.com/swaggo/files` supplies its assets. No separate documentation server or CDN is required. The middleware reads the existing OpenAPI 3 contract; it does not require generating a Swagger 2 document with `swag init`. These routes are disabled when `APP_ENV=production`.
+
+Sign in through `POST /api/auth/login` using the development account `user` / `123456`, then copy `data.accessToken` into **Authorize**. Use `admin` / `123456` for administration endpoints. Mock payments never charge real money.
 
 ## Try the API
 

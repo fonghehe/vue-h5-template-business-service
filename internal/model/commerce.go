@@ -105,7 +105,7 @@ type CouponUsage struct {
 }
 
 // Order is the aggregate root for checkout. IdempotencyKey is unique per user
-// and RequestHash prevents accidental reuse of a key for a different cart.
+// and RequestHash prevents accidental reuse of a key for a different checkout payload.
 type Order struct {
 	ID             uint                 `gorm:"primaryKey" json:"id"`
 	OrderNo        string               `gorm:"column:order_no;size:40;uniqueIndex;not null" json:"orderNo"`

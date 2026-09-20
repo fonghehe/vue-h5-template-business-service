@@ -4,15 +4,19 @@
 package middleware
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/fonghehe/vue-h5-template-business-service/internal/apierr"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
-	"github.com/fonghehe/vue-h5-template-business-service/internal/config"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/response"
 )
 
@@ -55,6 +59,11 @@ func CORS(origins []string) gin.HandlerFunc {
 				c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID, Idempotency-Key, X-Mock-Signature")
 				c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
 				c.Header("Access-Control-Max-Age", "86400")
+				c.Header("Access-Control-Expose-Headers", "X-Request-ID, Retry-After")
+			} else {
+				response.Fail(c, apierr.Forbidden("Origin is not allowed"))
+				c.Abort()
+				return
 			}
 		}
 		if c.Request.Method == http.MethodOptions {
@@ -78,23 +87,25 @@ type visitor struct {
 // This implementation is intentionally dependency-free and bounded: idle
 // visitors are evicted so the map cannot grow without limit.
 type RateLimit struct {
-	mu        sync.Mutex
-	limit     float64 // tokens added per second
-	burst     int
-	visitors  map[string]*visitor
-	ttl       time.Duration
-	lastSweep time.Time
+	mu          sync.Mutex
+	limit       float64 // tokens added per second
+	burst       int
+	visitors    map[string]*visitor
+	ttl         time.Duration
+	lastSweep   time.Time
+	maxVisitors int
 }
 
 // NewRateLimit builds a limiter allowing rps sustained requests with a burst
 // capacity of burst.
 func NewRateLimit(rps float64, burst int) *RateLimit {
 	return &RateLimit{
-		limit:     rps,
-		burst:     burst,
-		visitors:  make(map[string]*visitor),
-		ttl:       10 * time.Minute,
-		lastSweep: time.Now(),
+		limit:       rps,
+		burst:       burst,
+		visitors:    make(map[string]*visitor),
+		ttl:         10 * time.Minute,
+		lastSweep:   time.Now(),
+		maxVisitors: 10000,
 	}
 }
 
@@ -128,6 +139,9 @@ func (rl *RateLimit) allow(key string) bool {
 
 	state, ok := rl.visitors[key]
 	if !ok {
+		if len(rl.visitors) >= rl.maxVisitors {
+			return false
+		}
 		rl.visitors[key] = &visitor{tokens: float64(rl.burst) - 1, last: now}
 		return true
 	}
@@ -170,7 +184,7 @@ func SecurityHeaders() gin.HandlerFunc {
 }
 
 // BodyLimit rejects oversized payloads before they are parsed.
-func BodyLimit(cfg config.Config) gin.HandlerFunc {
+func BodyLimit() gin.HandlerFunc {
 	// 1 MiB is comfortably above any payload this API accepts.
 	const maxBodyBytes = 1 << 20
 	return func(c *gin.Context) {
@@ -185,6 +199,37 @@ func BodyLimit(cfg config.Config) gin.HandlerFunc {
 			return
 		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
+		// Reading once bounds chunked requests and trailing data too. A JSON
+		// decoder alone may stop after the first object without hitting the limit.
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			var sizeError *http.MaxBytesError
+			switch {
+			case errors.As(err, &sizeError):
+				response.Fail(c, apierr.New(apierr.CodePayloadTooLarge, "request body too large"))
+			case c.Request.Context().Err() != nil:
+				response.Fail(c, c.Request.Context().Err())
+			default:
+				response.Fail(c, apierr.Validation("request body could not be read"))
+			}
+			c.Abort()
+			return
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(body))
 		c.Next()
+	}
+}
+
+// Timeout cooperatively cancels database/cache work without running Gin in a
+// detached goroutine. Handlers must propagate the request context.
+func Timeout(duration time.Duration) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), duration)
+		defer cancel()
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+		if ctx.Err() != nil && !c.Writer.Written() {
+			response.Fail(c, ctx.Err())
+		}
 	}
 }

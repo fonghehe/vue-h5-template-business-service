@@ -2,13 +2,12 @@ SHELL := /bin/bash
 
 BINARY  := server
 IMAGE   := vue-h5-template-business-service
-GOPROXY ?= https://proxy.golang.org,direct
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build run test test-race vet lint fmt check docker docker-run clean
+.PHONY: help build run test test-race vet lint fmt check docker migrate migrate-status clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -33,15 +32,18 @@ lint: ## Run golangci-lint (install it first: https://golangci-lint.run)
 	golangci-lint run ./...
 
 fmt: ## Format all Go source
-	gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
+	gofmt -w .
 
 check: fmt vet test ## Format, vet and test in one pass
 
+migrate: ## Apply database migrations without starting HTTP or seeding
+	go run ./cmd/migrate up
+
+migrate-status: ## Show applied and pending migrations
+	go run ./cmd/migrate status
+
 docker: ## Build the production image
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):latest .
-
-docker-run: docker ## Run the image with the example environment
-	docker run --rm -p 8002:8002 --env-file .env $(IMAGE):latest
 
 clean: ## Remove build artifacts
 	rm -rf bin coverage.out

@@ -14,32 +14,14 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/fonghehe/vue-h5-template-business-service/internal/apierr"
+	"github.com/fonghehe/vue-h5-template-business-service/internal/requestctx"
 )
 
-type requestContextKey string
-
-const (
-	requestIDContextKey requestContextKey = "request-id"
-	userIDContextKey    requestContextKey = "user-id"
-)
-
+// These wrappers preserve the existing helpers while metadata is transport-neutral.
 func WithRequestID(ctx context.Context, requestID string) context.Context {
-	return context.WithValue(ctx, requestIDContextKey, requestID)
+	return requestctx.WithID(ctx, requestID)
 }
-
-func RequestIDFromContext(ctx context.Context) string {
-	value, _ := ctx.Value(requestIDContextKey).(string)
-	return value
-}
-
-func WithUserID(ctx context.Context, userID uint) context.Context {
-	return context.WithValue(ctx, userIDContextKey, userID)
-}
-
-func UserIDFromContext(ctx context.Context) uint {
-	value, _ := ctx.Value(userIDContextKey).(uint)
-	return value
-}
+func RequestIDFromContext(ctx context.Context) string { return requestctx.ID(ctx) }
 
 // Context keys shared by the middleware chain and the response writer. They
 // live here (rather than in the middleware package) so that transport helpers
@@ -47,7 +29,6 @@ func UserIDFromContext(ctx context.Context) uint {
 const (
 	ContextKeyRequestID = "requestID"
 	ContextKeyUserID    = "userID"
-	ContextKeyUsername  = "username"
 	ContextKeyRoles     = "roles"
 )
 
@@ -67,11 +48,19 @@ type Envelope struct {
 
 // OK writes a successful envelope.
 func OK(c *gin.Context, data any) {
+	if err := c.Request.Context().Err(); err != nil {
+		Fail(c, err)
+		return
+	}
 	write(c, http.StatusOK, apierr.CodeOK, "ok", data, nil)
 }
 
 // Created writes a successful envelope with HTTP 201.
 func Created(c *gin.Context, data any) {
+	if err := c.Request.Context().Err(); err != nil {
+		Fail(c, err)
+		return
+	}
 	write(c, http.StatusCreated, apierr.CodeOK, "created", data, nil)
 }
 
@@ -83,6 +72,11 @@ func Fail(c *gin.Context, err error) {
 		// The client disconnected before the response was written.
 		c.Abort()
 		return
+	}
+	if apiErr.Cause != nil {
+		// AccessLog records private errors after the handler. The response below
+		// still contains only the safe public message and details.
+		_ = c.Error(apiErr).SetType(gin.ErrorTypePrivate)
 	}
 	write(c, apiErr.Status, apiErr.Code, apiErr.Message, nil, apiErr.Details)
 }

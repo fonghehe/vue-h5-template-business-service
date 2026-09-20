@@ -17,7 +17,7 @@ import (
 	"github.com/fonghehe/vue-h5-template-business-service/internal/metrics"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/model"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/repository"
-	"github.com/fonghehe/vue-h5-template-business-service/internal/response"
+	"github.com/fonghehe/vue-h5-template-business-service/internal/requestctx"
 )
 
 const (
@@ -162,18 +162,20 @@ func (s *PaymentService) HandleWebhook(ctx context.Context, callback PaymentCall
 	if err := s.provider.VerifyWebhook(callback, signature); err != nil {
 		return model.Order{}, false, err
 	}
-	now := s.now().UTC()
 	var result model.Order
 	duplicate := false
 	err := s.repo.Transaction(ctx, func(tx *repository.CommerceRepository) error {
-		payment, err := tx.LockPaymentByReference(ctx, callback.Reference)
-		if err != nil {
-			return err
-		}
+		// Every payment operation locks the order before its payment record.
 		order, err := tx.LockOrderByNo(ctx, callback.OrderNo)
 		if err != nil {
 			return err
 		}
+		payment, err := tx.LockPaymentByReference(ctx, callback.Reference)
+		if err != nil {
+			return err
+		}
+		now := s.now().UTC()
+
 		if payment.OrderID != order.ID || payment.Reference != callback.Reference {
 			return apierr.Conflict("payment reference does not belong to the order")
 		}
@@ -217,7 +219,7 @@ func (s *PaymentService) HandleWebhook(ctx context.Context, callback PaymentCall
 			return nil
 		}
 
-		if order.Status == model.OrderPaid && payment.Status == model.PaymentSucceeded {
+		if payment.Status == model.PaymentSucceeded && (order.Status == model.OrderPaid || order.Status == model.OrderProcessing || order.Status == model.OrderCompleted) {
 			duplicate = true
 			result = order
 			return nil
@@ -267,7 +269,7 @@ func (s *PaymentService) HandleWebhook(ctx context.Context, callback PaymentCall
 		if s.metrics != nil {
 			s.metrics.OrdersPaid.Inc()
 		}
-		s.logger.InfoContext(ctx, "order.paid", "requestId", response.RequestIDFromContext(ctx), "userId", result.UserID, "orderNo", result.OrderNo,
+		s.logger.InfoContext(ctx, "order.paid", "requestId", requestctx.ID(ctx), "userId", result.UserID, "orderNo", result.OrderNo,
 			"paymentReference", callback.Reference, "amount", callback.Amount)
 	}
 	return result, duplicate, nil

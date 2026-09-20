@@ -19,17 +19,23 @@ curl http://localhost:8002/ready
 curl 'http://localhost:8002/api/product/list?page=1&pageSize=10'
 ```
 
-仓库中的 Compose 配置会启动 API、PostgreSQL 和 Redis，并使用**仅供开发使用**的凭据与种子数据。原生运行 Go 进程时必须显式导出环境变量；程序不会自动读取 `.env`。可运行的数据库地址与命令见[快速开始](https://fonghehe.github.io/vue-h5-template-business-service/zh/quickstart)。
+仓库中的 Compose 配置会启动 API、PostgreSQL 和 Redis，并使用**仅供开发使用**的凭据与种子数据。源码开发时复制 `.env.example` 为项目根目录的 `.env`，程序会自动加载；已有进程环境变量优先。可运行的数据库地址与命令见[快速开始](https://fonghehe.github.io/vue-h5-template-business-service/zh/quickstart)。
 
 如果要从源码启动 API，而不是运行 Compose 的 `business` 服务：
 
 ```bash
-POSTGRES_PORT=5433 docker compose up -d postgres
-export DATABASE_URL='postgres://vue_h5:vue_h5_local@127.0.0.1:5433/vue_h5_business?sslmode=disable'
+cp .env.example .env # 仅首次；按需修改项目内的 DATABASE_URL
+POSTGRES_PORT=5433 docker compose up -d --wait postgres # 需要容器数据库时执行
 go run ./cmd/server
 ```
 
-裸跑 Go 命令会使用默认的 `localhost:5432`，那里可能属于其他应用。不要为了启动本服务而迁移或删除那个数据库。
+示例 `.env` 使用 5433 端口的专用开发数据库。如果已有本地 PostgreSQL，在 `.env` 中配置本服务的专用数据库地址，即可省略 Compose 命令。缺少 `.env` 且未指定 `DATABASE_URL` 时，Go 命令仍会回退到 `localhost:5432`，那里可能属于其他应用。不要为了启动本服务而迁移或删除那个数据库。
+
+## 交互式 API 文档
+
+开发环境 Swagger 地址为 [http://localhost:8002/swagger/index.html](http://localhost:8002/swagger/index.html)。当前 OpenAPI 契约位于 `/openapi.yaml`。页面通过 `github.com/swaggo/gin-swagger` 注册，资源由 `github.com/swaggo/files` 提供，无需独立文档服务或 CDN。中间件直接读取现有 OpenAPI 3 契约，不需要用 `swag init` 另行生成 Swagger 2 文档。`APP_ENV=production` 时不注册这些路由。
+
+通过 `POST /api/auth/login` 使用开发账号 `user` / `123456` 登录，复制 `data.accessToken` 到 **Authorize** 即可调试鉴权接口。管理接口使用 `admin` / `123456`。支付接口为模拟支付，不会真实扣款。
 
 ## 检查
 
@@ -52,3 +58,7 @@ PostgreSQL 的“100 人抢购、库存 10 件”并发测试需要 `TEST_DATABA
 ## 许可证
 
 [MIT](./LICENSE)
+
+## 架构与生产运维
+
+保留 `Handler → Service → Repository → PostgreSQL`，显式 HTTP DTO 固定客户端契约。`make migrate` 执行顺序迁移，`make migrate-status` 查询版本，不启动 HTTP 或写种子。staging/production 默认 `AUTO_MIGRATE=false`，启动副本前必须完成迁移。独立 `compose.production.yml` 使用外部提供的专用数据库部署镜像。部署前阅读[生产行为与升级说明](docs/zh/production.md)。刷新会话现已支持单次轮换与退出撤销，已有旧刷新令牌的用户需要重新登录。

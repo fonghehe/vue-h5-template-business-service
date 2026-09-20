@@ -37,6 +37,7 @@ curl -X POST http://localhost:8002/api/orders \
 
 ```text
 BEGIN
+  锁定购物车所属用户，重新检查幂等 Key
   读取购物车，拒绝空车或超过 100 项
   按 SKU ID 排序并锁定/重读最新 SKU，计算整数分总额
   锁定并校验优惠券和使用限制
@@ -47,6 +48,8 @@ COMMIT；任一步失败均回滚
 ```
 
 OrderItem 保存 `productName`、`skuName`、`unitPrice`、`quantity`，以后改商品不会改历史订单。`payableAmount = originalAmount - discountAmount` 由服务端计算。`(user_id, idempotency_key)` 数据库唯一索引是最终防重保障；Redis 不承担正确性。网络超时重试不会再次预占库存或优惠券。
+
+购物车增删改与结算共享账号锁。不同 Key 并发请求不能重复消耗同一购物车；在结算后等待执行的写入不会被清空操作删除。同 Key 重试始终返回原订单，即使购物车后来已改变。
 
 ## 库存和订单状态
 
@@ -68,9 +71,13 @@ OrderItem 保存 `productName`、`skuName`、`unitPrice`、`quantity`，以后�
 
 `internal/service/payment_test.go` 的 `TestPaymentWebhookIsIdempotent` 展示真实签名调用 `provider.Sign(callback)`，同一事件发送十次仍只支付一次。`(provider, event_id)` 唯一约束和载荷哈希使相同回调可安全重放；同事件 ID 配不同内容返回 `409`。失败回调只标记支付尝试失败，订单仍待支付，可重试、取消或超时。接真实渠道前必须实现该渠道的验签、事件语义和对账规则。
 
+回调统一先锁订单再锁支付记录，拿到两把锁后再用当前时间校验有效期。支付已成功且订单为 `PAID`、`PROCESSING` 或 `COMPLETED` 时，新事件 ID 的有效成功通知同样按重复处理，不再次扣减库存、不倒退履约状态。
+
 ## 超时与多实例
 
 `cmd/server/main.go` 启动订单过期 Worker。它按 `ORDER_EXPIRATION_INTERVAL` 周期取批；PostgreSQL `FOR UPDATE SKIP LOCKED` 让多个实例领取不同订单。每笔订单在一个事务里转 `EXPIRED`、释放库存及优惠券、追加历史。状态锁避免并发取消/支付重复释放；优雅关闭时 Worker 随上下文停止。
+
+每轮最多尝试 `ORDER_EXPIRATION_BATCH_SIZE` 笔订单。失败订单回滚后在本轮被跳过并报告错误，其他订单仍可提交；下一轮会再次尝试失败订单。库存行按 SKU ID 固定顺序访问，不跨订单持有库存锁。
 
 ## 验证规则
 
@@ -80,3 +87,5 @@ go test -race ./...
 ```
 
 SQLite 测试覆盖回滚、优惠券、幂等、重复回调、状态转换；PostgreSQL 并发测试还需 `TEST_DATABASE_URL`，CI 会提供。`TestPostgresConcurrentOrdersNeverOversell` 用 100 个用户/购物车同时买库存 10，断言仅 10 单提交且库存不为负。测试接线见[扩展服务](/zh/development)，运维边界见[部署](/zh/deployment)。
+
+补充的回归测试覆盖同一购物车并发结算、结算期间新增商品、锁等待后支付过期、过期任务失败隔离，以及数据库初始化失败后的连接池清理。

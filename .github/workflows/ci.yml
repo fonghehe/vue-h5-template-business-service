@@ -37,6 +37,12 @@ jobs:
         run: |
           test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
 
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Build
+        run: go build ./...
+
       - name: Vet
         run: go vet ./...
 

@@ -37,6 +37,7 @@ const (
 	// 5000–5999: the caller cannot fix these; alert on them.
 	CodeInternal    = 5000
 	CodeUnavailable = 5030
+	CodeTimeout     = 5040
 )
 
 // Error is the canonical service error.
@@ -81,13 +82,11 @@ func Wrap(code int, message string, cause error) *Error {
 
 // Convenience constructors for the codes used by the service.
 
-func BadRequest(message string) *Error   { return New(CodeBadRequest, message) }
 func Validation(message string) *Error   { return New(CodeValidation, message) }
 func Unauthorized(message string) *Error { return New(CodeUnauthorized, message) }
 func Forbidden(message string) *Error    { return New(CodeForbidden, message) }
 func NotFound(message string) *Error     { return New(CodeNotFound, message) }
 func Conflict(message string) *Error     { return New(CodeConflict, message) }
-func RateLimited(message string) *Error  { return New(CodeRateLimited, message) }
 func Internal(message string) *Error     { return New(CodeInternal, message) }
 func Unavailable(message string) *Error  { return New(CodeUnavailable, message) }
 
@@ -112,6 +111,8 @@ func statusForCode(code int) int {
 		return http.StatusRequestEntityTooLarge
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable
+	case CodeTimeout:
+		return http.StatusGatewayTimeout
 	case CodeInternal:
 		return http.StatusInternalServerError
 	default:
@@ -123,12 +124,15 @@ func statusForCode(code int) int {
 // failures uniformly. Unknown failures become an opaque internal error: the
 // original message is logged by the middleware but never leaked to clients.
 func FromError(err error) *Error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return Wrap(CodeTimeout, "Request timed out", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
 	var apiErr *Error
 	if errors.As(err, &apiErr) {
 		return apiErr
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return nil // client went away or timed out; nothing to report
 	}
 	return Wrap(CodeInternal, "Internal server error", err)
 }

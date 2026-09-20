@@ -37,6 +37,7 @@ curl -X POST http://localhost:8002/api/orders \
 
 ```text
 BEGIN
+  カート所有者をロックし、冪等キーを再確認
   カート取得（空または 100 項目超を拒否）
   SKU ID 順にロック/再読込し、サーバー価格を整数で計算
   クーポンをロックし使用上限を検証
@@ -47,6 +48,8 @@ COMMIT（いずれかが失敗すれば全てロールバック）
 ```
 
 OrderItem は `productName`、`skuName`、`unitPrice`、`quantity` を保存するため、その後の商品編集は過去の注文に影響しません。`payableAmount = originalAmount - discountAmount` はサーバーで計算します。DB の `(user_id, idempotency_key)` 一意索引が最終的な重複防止であり、Redis に正しさを依存しません。
+
+カート更新と注文作成は同じアカウントロックを使います。並行する別キーでも同じカートを二度消費せず、注文の後に待機した更新は消去後に実行されます。同じキーの再送は、カートが変わっていても元の注文を返します。
 
 ## 在庫不変条件と状態遷移
 
@@ -68,9 +71,13 @@ OrderItem は `productName`、`skuName`、`unitPrice`、`quantity` を保存す�
 
 `internal/service/payment_test.go` の `TestPaymentWebhookIsIdempotent` は実際の `provider.Sign(callback)` と同じイベントの十回送信を示します。`(provider, event_id)` 一意制約とペイロードハッシュにより同じ再送は安全で、同じ ID に違う内容は `409` です。失敗イベントは決済試行のみを失敗にし、注文は再試行/キャンセル/期限切れまで待機します。実決済導入時にはその事業者固有の署名、イベント、照合を設計してください。
 
+Webhook は注文、決済の順にロックし、取得後の現在時刻で期限を確認します。決済が成功済みで注文が `PAID`、`PROCESSING`、`COMPLETED` の場合、新しいイベント ID の検証済み成功通知も重複として扱い、在庫を再度減らしたり履行状態を戻したりしません。
+
 ## 期限切れと複数インスタンス
 
 `cmd/server/main.go` は期限切れ Worker を起動します。`ORDER_EXPIRATION_INTERVAL` ごとにバッチを取得し、PostgreSQL の `FOR UPDATE SKIP LOCKED` で複数インスタンスに異なる注文を割り当てます。一つのトランザクションで `EXPIRED`、在庫・クーポン確保の解除、履歴追加を行います。状態ロックで二重解放を防ぎ、グレースフルシャットダウンで Worker も停止します。
+
+一回に最大 `ORDER_EXPIRATION_BATCH_SIZE` 件を試行します。失敗した注文はロールバックしてその回では除外し、エラーを報告して他の注文はコミットします。失敗注文は次の回で再試行します。在庫は SKU ID 順に処理し、注文をまたいでロックを保持しません。
 
 ## 保証のテスト
 
@@ -80,3 +87,5 @@ go test -race ./...
 ```
 
 SQLite テストはロールバック、クーポン、冪等性、重複 Webhook、状態遷移を扱います。PostgreSQL 並行テストには `TEST_DATABASE_URL` が必要で、CI が設定します。`TestPostgresConcurrentOrdersNeverOversell` は在庫 10 に 100 人が同時注文し、10 件のみ成功し在庫が負にならないことを確認します。テスト構成は[開発](/ja/development)、運用上の制限は[デプロイ](/ja/deployment)を参照してください。
+
+追加の回帰テストは同じカートの並行注文、注文中の商品追加、ロック待機後の決済期限、期限切れ処理の障害分離、DB 初期化失敗時のプール解放を検証します。

@@ -1,13 +1,16 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"errors"
+	"io"
+	"math"
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/fonghehe/vue-h5-template-business-service/internal/apierr"
+	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 )
 
 // pagination reads and clamps page and pageSize query parameters.
@@ -18,6 +21,9 @@ func pagination(c *gin.Context, defaultSize, maxSize int) (int, int) {
 	pageSize := positiveInt(c.Query("pageSize"), defaultSize)
 	if pageSize > maxSize {
 		pageSize = maxSize
+	}
+	if page > math.MaxInt/pageSize {
+		page = 1
 	}
 	return page, pageSize
 }
@@ -51,8 +57,23 @@ func optionalNonNegativeInt64(value string) (*int64, error) {
 	return &parsed, nil
 }
 
-// serviceUnavailable reports a dependency outage. The underlying reason is
-// logged by the caller but never exposed to the client.
-func serviceUnavailable(cause error) error {
-	return apierr.Unavailable("Service temporarily unavailable")
+// bindJSON accepts exactly one JSON value and hides decoder/validator internals.
+// Empty bodies are allowed only on endpoints explicitly supporting cookie-only
+// requests or an empty checkout payload.
+func bindJSON(c *gin.Context, input any, optional bool, message string) error {
+	decoder := json.NewDecoder(c.Request.Body)
+	if err := decoder.Decode(input); err != nil {
+		if optional && errors.Is(err, io.EOF) {
+			return nil
+		}
+		return apierr.Validation(message)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return apierr.Validation(message)
+	}
+	if err := binding.Validator.ValidateStruct(input); err != nil {
+		return apierr.Validation(message)
+	}
+	return nil
 }

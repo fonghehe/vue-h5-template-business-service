@@ -18,33 +18,38 @@ type schemaMigration struct {
 
 // migration is a single ordered schema change.
 type migration struct {
-	version string
-	run     func(*gorm.DB) error
+	version       string
+	legacyVersion string // Previous date-based ID, accepted for existing databases.
+	run           func(*gorm.DB) error
 }
 
 // migrations is append-only. Never edit an entry that has shipped: add a new
 // migration instead, so existing databases converge on the same schema.
 var migrations = []migration{
 	{
-		version: "2026090101_create_users",
+		version:       "001_create_users",
+		legacyVersion: "2026090101_create_users",
 		run: func(db *gorm.DB) error {
 			return db.AutoMigrate(&model.User{})
 		},
 	},
 	{
-		version: "2026090102_create_products",
+		version:       "002_create_products",
+		legacyVersion: "2026090102_create_products",
 		run: func(db *gorm.DB) error {
 			return db.AutoMigrate(&model.Product{})
 		},
 	},
 	{
-		version: "2026090103_create_favorites",
+		version:       "003_create_favorites",
+		legacyVersion: "2026090103_create_favorites",
 		run: func(db *gorm.DB) error {
 			return db.AutoMigrate(&model.Favorite{})
 		},
 	},
 	{
-		version: "2026092301_extend_product_catalogue",
+		version:       "004_extend_product_catalogue",
+		legacyVersion: "2026092301_extend_product_catalogue",
 		run: func(db *gorm.DB) error {
 			if err := db.AutoMigrate(&model.Product{}, &model.ProductSKU{}, &model.Inventory{}); err != nil {
 				return err
@@ -58,13 +63,15 @@ var migrations = []migration{
 		},
 	},
 	{
-		version: "2026092302_create_cart_and_coupon",
+		version:       "005_create_cart_and_coupon",
+		legacyVersion: "2026092302_create_cart_and_coupon",
 		run: func(db *gorm.DB) error {
 			return db.AutoMigrate(&model.CartItem{}, &model.Coupon{}, &model.CouponUsage{})
 		},
 	},
 	{
-		version: "2026092303_create_orders_and_payments",
+		version:       "006_create_orders_and_payments",
+		legacyVersion: "2026092303_create_orders_and_payments",
 		run: func(db *gorm.DB) error {
 			return db.AutoMigrate(
 				&model.Order{},
@@ -76,13 +83,39 @@ var migrations = []migration{
 		},
 	},
 	{
-		version: "2026092304_backfill_legacy_skus",
-		run:     backfillLegacySKUInventory,
+		version:       "007_backfill_legacy_skus",
+		legacyVersion: "2026092304_backfill_legacy_skus",
+		run:           backfillLegacySKUInventory,
+	},
+	{
+		version:       "008_create_refresh_sessions",
+		legacyVersion: "2026100201_create_refresh_sessions",
+		run:           func(db *gorm.DB) error { return db.AutoMigrate(&model.RefreshSession{}) },
+	},
+	{
+		version:       "009_enforce_commerce_constraints",
+		legacyVersion: "2026100202_enforce_commerce_constraints",
+		run: func(db *gorm.DB) error {
+			return db.AutoMigrate(&model.ProductSKU{}, &model.Inventory{}, &model.CartItem{}, &model.Coupon{}, &model.CouponUsage{}, &model.Order{}, &model.OrderItem{}, &model.Payment{})
+		},
 	},
 }
 
-// Migrate applies every pending migration inside its own transaction.
+// Migrate applies the complete pending batch in one transaction.
 func Migrate(db *gorm.DB) error {
+	// Keep the lock and all migration work on the same transaction/connection.
+	// The schema-specific key allows isolated test schemas to migrate in parallel.
+	return db.Transaction(func(tx *gorm.DB) error {
+		if tx.Name() == "postgres" {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(hashtextextended(current_database() || ':' || current_schema() || ':business-migrations', 0))").Error; err != nil {
+				return fmt.Errorf("lock migrations: %w", err)
+			}
+		}
+		return migrate(tx)
+	})
+}
+
+func migrate(db *gorm.DB) error {
 	if err := rejectIncompatibleSchema(db); err != nil {
 		return err
 	}
@@ -90,7 +123,7 @@ func Migrate(db *gorm.DB) error {
 		return fmt.Errorf("create migration table: %w", err)
 	}
 	for _, item := range migrations {
-		applied, err := isApplied(db, item.version)
+		applied, err := isApplied(db, item)
 		if err != nil {
 			return err
 		}
@@ -104,6 +137,44 @@ func Migrate(db *gorm.DB) error {
 			return tx.Create(&schemaMigration{Version: item.version}).Error
 		}); err != nil {
 			return fmt.Errorf("apply migration %s: %w", item.version, err)
+		}
+	}
+	return nil
+}
+
+// MigrationStatus is the operator-facing schema version ledger.
+type MigrationStatus struct {
+	Version string
+	Applied bool
+}
+
+func Status(db *gorm.DB) ([]MigrationStatus, error) {
+	result := make([]MigrationStatus, 0, len(migrations))
+	hasLedger := db.Migrator().HasTable(&schemaMigration{})
+	for _, item := range migrations {
+		applied := false
+		if hasLedger {
+			var err error
+			applied, err = isApplied(db, item)
+			if err != nil {
+				return nil, err
+			}
+		}
+		result = append(result, MigrationStatus{Version: item.version, Applied: applied})
+	}
+	return result, nil
+}
+
+// CheckSchema prevents a healthy-looking server from booting against an empty
+// or outdated database when automatic migrations are disabled.
+func CheckSchema(db *gorm.DB) error {
+	status, err := Status(db)
+	if err != nil {
+		return err
+	}
+	for _, item := range status {
+		if !item.Applied {
+			return fmt.Errorf("pending migration %s: run make migrate before starting the server", item.Version)
 		}
 	}
 	return nil
@@ -128,10 +199,14 @@ func rejectIncompatibleSchema(db *gorm.DB) error {
 	return nil
 }
 
-func isApplied(db *gorm.DB, version string) (bool, error) {
+func isApplied(db *gorm.DB, item migration) (bool, error) {
+	versions := []string{item.version}
+	if item.legacyVersion != "" {
+		versions = append(versions, item.legacyVersion)
+	}
 	var count int64
-	if err := db.Model(&schemaMigration{}).Where("version = ?", version).Count(&count).Error; err != nil {
-		return false, fmt.Errorf("check migration %s: %w", version, err)
+	if err := db.Model(&schemaMigration{}).Where("version IN ?", versions).Count(&count).Error; err != nil {
+		return false, fmt.Errorf("check migration %s: %w", item.version, err)
 	}
 	return count > 0, nil
 }

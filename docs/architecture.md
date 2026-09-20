@@ -45,13 +45,12 @@ Unknown errors are normalised to an opaque `5000` — the original cause is logg
   mints an access token and a refresh token. The refresh token is written to an `HttpOnly` cookie; the access
   token is returned in the body.
 - **Access tokens** are short-lived (`2h`) and sent as `Authorization: Bearer …`.
-- **Refresh** issues a new token pair using the cookie (or a body-supplied refresh token for non-browser clients). There is no server-side refresh-token/session store or immediate access-token revocation: logout clears the cookie and clients must discard the access token.
 - If another service accepts this service's JWTs, configure a matching `JWT_SECRET`, `JWT_ISSUER` and
   `JWT_AUDIENCE` there. This repository does not implement or verify the separate AI service.
 
 ## Data
 
-- PostgreSQL is the runtime source of truth; SQLite is only for isolated tests and demos. SQLite cannot prove PostgreSQL locking behaviour.
+- PostgreSQL is the runtime source of truth; SQLite is only for isolated tests. SQLite cannot prove PostgreSQL locking behaviour.
 - `internal/database/migrate.go` applies ordered, recorded migrations when `AUTO_MIGRATE=true`; a separate data migration backfills default SKUs for legacy products. `internal/database/seed.go` adds demo users/catalogue/coupons only when `SEED=true` and does not overwrite populated tables.
 - SKU, order and payment amounts use `int64` minor units. Legacy Product price strings remain compatibility fields.
 
@@ -66,3 +65,15 @@ Unknown errors are normalised to an opaque `5000` — the original cause is logg
 - Redis contains only product catalogue fields and SKUs. Product detail attaches fresh inventory from PostgreSQL on every request; orders and inventory are never cached.
 
 For the concrete checkout, payment and timeout sequence, see [Commerce flow](/commerce). To add a handler/service/repository slice, see [Extend the service](/development).
+
+## Consistency and failure boundaries
+
+Cart writes and checkout lock the same user row with PostgreSQL `FOR NO KEY UPDATE` inside their transactions. This also protects an empty cart from concurrent inserts, works across service instances, and serializes only the same account. Checkout rechecks the idempotency key after acquiring the lock: the same key replays the original order; different keys cannot consume the same cart twice. Writes waiting behind checkout run after its cart clear, so new items remain available for the next checkout.
+
+Expiration claims and commits one order at a time. A failed order rolls back only its own stock/coupon changes, is skipped for the rest of that bounded pass, and is reported while healthy orders continue. Inventory rows are processed in SKU-ID order. Payment creation and callbacks acquire order locks before payment locks; callbacks check time after waiting for those locks and preserve paid/processing/completed orders on a verified success replay.
+
+Favorites count and paginate the joined, non-deleted product relation in SQL, then batch-load associations. Query count is bounded by association types, rather than the number of favorites; duplicate favorite inserts use the database unique constraint atomically.
+
+Configuration validation finishes before resources open. Failed schema or seed initialization closes the database pool. Readiness uses the request context with a three-second limit, including pool waits. Internal error causes join the private access log with the request ID; public responses retain the safe error envelope.
+
+Refresh consumes a PostgreSQL session once and rotates it atomically; logout revokes the current refresh session. Access JWTs remain valid until expiry and clients must discard them. Current account status/roles are loaded on each authenticated business request. Existing refresh JWTs issued before this upgrade require login again.

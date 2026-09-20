@@ -11,7 +11,7 @@ cd vue-h5-template-business-service
 ```
 
 You need Go 1.25+. Tests that touch PostgreSQL run against the CI service container; most unit tests use a
-temporary SQLite database file and need no external services. For native startup, follow [Quick start](/quickstart): copying `.env.example` alone does not export process variables.
+temporary SQLite database file and need no external services. For native startup, follow [Quick start](/quickstart): copy `.env.example` to `.env` and configure the project database URL; the server loads it automatically.
 
 ## Development commands
 

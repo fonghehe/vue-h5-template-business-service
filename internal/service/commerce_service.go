@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -18,7 +19,7 @@ import (
 	"github.com/fonghehe/vue-h5-template-business-service/internal/metrics"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/model"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/repository"
-	"github.com/fonghehe/vue-h5-template-business-service/internal/response"
+	"github.com/fonghehe/vue-h5-template-business-service/internal/requestctx"
 )
 
 const (
@@ -38,44 +39,68 @@ func (s *CartService) List(ctx context.Context, userID uint) ([]model.CartItem, 
 	return s.repo.ListCart(ctx, userID)
 }
 
+// mutate shares the checkout locking boundary for every cart write.
+func (s *CartService) mutate(ctx context.Context, userID uint, fn func(*repository.CommerceRepository) error) error {
+	return repository.WrapTransaction(s.repo.Transaction(ctx, func(tx *repository.CommerceRepository) error {
+		if err := tx.LockCartOwner(ctx, userID); err != nil {
+			return err
+		}
+		return fn(tx)
+	}))
+}
+
 func (s *CartService) Add(ctx context.Context, userID, skuID uint, quantity int) (model.CartItem, error) {
 	if err := validateCartQuantity(quantity); err != nil {
 		return model.CartItem{}, err
 	}
-	sku, err := s.repo.FindSKU(ctx, skuID)
-	if err != nil {
-		return model.CartItem{}, err
-	}
-	if sku.Status != model.SKUStatusActive || sku.Product.Status != model.StatusOnSale {
-		return model.CartItem{}, apierr.Conflict("SKU is not available for sale")
-	}
-	item := model.CartItem{UserID: userID, SKUID: skuID, Quantity: quantity}
-	if err := s.repo.UpsertCartItem(ctx, &item); err != nil {
-		return model.CartItem{}, err
-	}
-	return s.repo.FindCartItem(ctx, userID, item.ID)
+	var result model.CartItem
+	err := s.mutate(ctx, userID, func(tx *repository.CommerceRepository) error {
+		sku, err := tx.FindSKU(ctx, skuID)
+		if err != nil {
+			return err
+		}
+		if sku.Status != model.SKUStatusActive || sku.Product.Status != model.StatusOnSale {
+			return apierr.Conflict("SKU is not available for sale")
+		}
+		item := model.CartItem{UserID: userID, SKUID: skuID, Quantity: quantity}
+		if err := tx.UpsertCartItem(ctx, &item); err != nil {
+			return err
+		}
+		result, err = tx.FindCartItem(ctx, userID, item.ID)
+		return err
+	})
+	return result, err
 }
 
 func (s *CartService) Update(ctx context.Context, userID, itemID uint, quantity int) (model.CartItem, error) {
 	if err := validateCartQuantity(quantity); err != nil {
 		return model.CartItem{}, err
 	}
-	item, err := s.repo.FindCartItem(ctx, userID, itemID)
-	if err != nil {
-		return model.CartItem{}, err
-	}
-	if item.SKU.Status != model.SKUStatusActive || item.SKU.Product.Status != model.StatusOnSale {
-		return model.CartItem{}, apierr.Conflict("SKU is not available for sale")
-	}
-	return s.repo.UpdateCartQuantity(ctx, userID, itemID, quantity)
+	var result model.CartItem
+	err := s.mutate(ctx, userID, func(tx *repository.CommerceRepository) error {
+		item, err := tx.FindCartItem(ctx, userID, itemID)
+		if err != nil {
+			return err
+		}
+		if item.SKU.Status != model.SKUStatusActive || item.SKU.Product.Status != model.StatusOnSale {
+			return apierr.Conflict("SKU is not available for sale")
+		}
+		result, err = tx.UpdateCartQuantity(ctx, userID, itemID, quantity)
+		return err
+	})
+	return result, err
 }
 
 func (s *CartService) Delete(ctx context.Context, userID, itemID uint) error {
-	return s.repo.DeleteCartItem(ctx, userID, itemID)
+	return s.mutate(ctx, userID, func(tx *repository.CommerceRepository) error {
+		return tx.DeleteCartItem(ctx, userID, itemID)
+	})
 }
 
 func (s *CartService) Clear(ctx context.Context, userID uint) error {
-	return s.repo.ClearCart(ctx, userID)
+	return s.mutate(ctx, userID, func(tx *repository.CommerceRepository) error {
+		return tx.ClearCart(ctx, userID)
+	})
 }
 
 func validateCartQuantity(quantity int) error {
@@ -122,9 +147,21 @@ func (s *OrderService) Create(ctx context.Context, userID uint, idempotencyKey s
 		return model.Order{}, false, err
 	}
 
-	now := s.now().UTC()
 	var created model.Order
+	replayed := false
 	err := s.repo.Transaction(ctx, func(tx *repository.CommerceRepository) error {
+		if err := tx.LockCartOwner(ctx, userID); err != nil {
+			return err
+		}
+		if existing, err := tx.FindOrderByIdempotency(ctx, userID, idempotencyKey); err == nil {
+			if existing.RequestHash != requestHash {
+				return apierr.Conflict("Idempotency-Key was already used with a different request")
+			}
+			created, replayed = existing, true
+			return nil
+		} else if !repository.IsNotFound(err) {
+			return err
+		}
 		cart, err := tx.ListCart(ctx, userID)
 		if err != nil {
 			return err
@@ -163,6 +200,7 @@ func (s *OrderService) Create(ctx context.Context, userID uint, idempotencyKey s
 			})
 		}
 
+		now := s.now().UTC()
 		discount, coupon, err := s.discount(ctx, tx, userID, strings.TrimSpace(input.CouponCode), originalAmount, now)
 		if err != nil {
 			return err
@@ -217,17 +255,20 @@ func (s *OrderService) Create(ctx context.Context, userID uint, idempotencyKey s
 		return model.Order{}, false, repository.WrapTransaction(err)
 	}
 
+	if replayed {
+		return created, true, nil
+	}
 	order, err := s.repo.FindOrderForUser(ctx, userID, created.ID)
 	if err != nil {
 		return model.Order{}, false, err
 	}
-	s.logger.InfoContext(ctx, "order.created", "requestId", response.RequestIDFromContext(ctx), "userId", userID, "orderNo", order.OrderNo,
+	s.logger.InfoContext(ctx, "order.created", "requestId", requestctx.ID(ctx), "userId", userID, "orderNo", order.OrderNo,
 		"originalAmount", order.OriginalAmount, "discountAmount", order.DiscountAmount, "payableAmount", order.PayableAmount)
 	if s.metrics != nil {
 		s.metrics.OrdersCreated.Inc()
 	}
 	for _, item := range order.Items {
-		s.logger.InfoContext(ctx, "inventory.reserved", "requestId", response.RequestIDFromContext(ctx), "userId", userID, "orderNo", order.OrderNo,
+		s.logger.InfoContext(ctx, "inventory.reserved", "requestId", requestctx.ID(ctx), "userId", userID, "orderNo", order.OrderNo,
 			"skuId", item.SKUID, "quantity", item.Quantity)
 	}
 	return order, false, nil
@@ -354,31 +395,36 @@ func (s *OrderService) Cancel(ctx context.Context, userID, orderID uint) (model.
 	}
 	order, err := s.repo.FindOrderForUser(ctx, userID, orderID)
 	if err == nil {
-		s.logger.InfoContext(ctx, "order.cancelled", "requestId", response.RequestIDFromContext(ctx), "userId", userID, "orderNo", order.OrderNo)
+		s.logger.InfoContext(ctx, "order.cancelled", "requestId", requestctx.ID(ctx), "userId", userID, "orderNo", order.OrderNo)
 		for _, item := range order.Items {
-			s.logger.InfoContext(ctx, "inventory.released", "requestId", response.RequestIDFromContext(ctx), "userId", userID, "orderNo", order.OrderNo,
+			s.logger.InfoContext(ctx, "inventory.released", "requestId", requestctx.ID(ctx), "userId", userID, "orderNo", order.OrderNo,
 				"skuId", item.SKUID, "quantity", item.Quantity, "reason", "cancelled")
 		}
 	}
 	return order, err
 }
 
+// Each claimed order commits independently. A malformed reservation cannot
+// roll back healthy orders, and workers never retain inventory locks across
+// multiple orders. Failed IDs are skipped for the rest of this bounded pass.
 func (s *OrderService) ExpireBatch(ctx context.Context) (int, error) {
-	now := s.now().UTC()
-	expiredOrders := make([]model.Order, 0, s.config.OrderExpirationBatchSize)
-	err := s.repo.Transaction(ctx, func(tx *repository.CommerceRepository) error {
-		ids, err := tx.LockExpiredOrderIDs(ctx, now, s.config.OrderExpirationBatchSize)
-		if err != nil {
-			return err
-		}
-		for _, id := range ids {
-			order, err := tx.LockOrderByID(ctx, id)
+	failedIDs := make([]uint, 0)
+	expired := 0
+	var failures error
+	for range s.config.OrderExpirationBatchSize {
+		var order model.Order
+		found := false
+		err := s.repo.Transaction(ctx, func(tx *repository.CommerceRepository) error {
+			var err error
+			now := s.now().UTC()
+			order, err = tx.LockNextExpiredOrder(ctx, now, failedIDs)
+			if repository.IsNotFound(err) {
+				return nil
+			}
 			if err != nil {
 				return err
 			}
-			if order.Status != model.OrderPendingPayment || !order.ExpiresAt.Before(now) {
-				continue
-			}
+			found = true
 			history, err := TransitionOrder(&order, model.OrderExpired, "payment timeout", now)
 			if err != nil {
 				return err
@@ -393,27 +439,30 @@ func (s *OrderService) ExpireBatch(ctx context.Context) (int, error) {
 					return err
 				}
 			}
-			if err := tx.SaveOrderAndHistory(ctx, &order, &history); err != nil {
-				return err
+			return tx.SaveOrderAndHistory(ctx, &order, &history)
+		})
+		if err != nil {
+			failures = errors.Join(failures, repository.WrapTransaction(err))
+			if !found || ctx.Err() != nil {
+				break
 			}
-			expiredOrders = append(expiredOrders, order)
+			failedIDs = append(failedIDs, order.ID)
+			continue
 		}
-		return nil
-	})
-	if err != nil {
-		return 0, repository.WrapTransaction(err)
-	}
-	for _, order := range expiredOrders {
+		if !found {
+			break
+		}
+		expired++
 		if s.metrics != nil {
 			s.metrics.OrdersExpired.Inc()
 		}
-		s.logger.InfoContext(ctx, "order.expired", "requestId", response.RequestIDFromContext(ctx), "userId", order.UserID, "orderNo", order.OrderNo)
+		s.logger.InfoContext(ctx, "order.expired", "requestId", requestctx.ID(ctx), "userId", order.UserID, "orderNo", order.OrderNo)
 		for _, item := range order.Items {
-			s.logger.InfoContext(ctx, "inventory.released", "requestId", response.RequestIDFromContext(ctx), "userId", order.UserID,
+			s.logger.InfoContext(ctx, "inventory.released", "requestId", requestctx.ID(ctx), "userId", order.UserID,
 				"orderNo", order.OrderNo, "skuId", item.SKUID, "quantity", item.Quantity, "reason", "expired")
 		}
 	}
-	return len(expiredOrders), nil
+	return expired, failures
 }
 
 func productDisplayName(product model.Product) string {

@@ -33,6 +33,21 @@ func (r *CommerceRepository) Transaction(ctx context.Context, fn func(*CommerceR
 
 func (r *CommerceRepository) Dialect() string { return r.db.Name() }
 
+// LockCartOwner serializes a user's cart writes and checkout across replicas.
+// Row locks cover an empty cart too, preventing inserts from escaping checkout.
+// Call only inside Transaction; SQLite is used by isolated unit tests.
+func (r *CommerceRepository) LockCartOwner(ctx context.Context, userID uint) error {
+	var user model.User
+	db := r.db.WithContext(ctx).Select("id")
+	if r.Dialect() == "postgres" {
+		db = db.Clauses(clause.Locking{Strength: "NO KEY UPDATE"})
+	}
+	if err := db.First(&user, userID).Error; err != nil {
+		return translate(err, "account not found")
+	}
+	return nil
+}
+
 func (r *CommerceRepository) ListCart(ctx context.Context, userID uint) ([]model.CartItem, error) {
 	var items []model.CartItem
 	err := r.db.WithContext(ctx).
@@ -418,20 +433,22 @@ func (r *CommerceRepository) FindWebhookEvent(ctx context.Context, provider, eve
 	return event, nil
 }
 
-// LockExpiredOrderIDs claims a batch for one worker. PostgreSQL's SKIP LOCKED
-// lets replicas process disjoint rows without blocking one another.
-func (r *CommerceRepository) LockExpiredOrderIDs(ctx context.Context, now time.Time, limit int) ([]uint, error) {
-	var ids []uint
-	db := r.db.WithContext(ctx).Model(&model.Order{}).
-		Where("status = ? AND expires_at < ?", model.OrderPendingPayment, now).
-		Order("expires_at ASC").Limit(limit)
+// LockNextExpiredOrder claims one order without blocking another worker.
+func (r *CommerceRepository) LockNextExpiredOrder(ctx context.Context, now time.Time, excludedIDs []uint) (model.Order, error) {
+	var order model.Order
+	db := r.db.WithContext(ctx).Preload("Items", func(tx *gorm.DB) *gorm.DB { return tx.Order("sku_id ASC") }).
+		Where("status = ? AND expires_at <= ?", model.OrderPendingPayment, now).
+		Order("expires_at ASC, id ASC")
+	if len(excludedIDs) > 0 {
+		db = db.Where("id NOT IN ?", excludedIDs)
+	}
 	if r.Dialect() == "postgres" {
 		db = db.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
 	}
-	if err := db.Pluck("id", &ids).Error; err != nil {
-		return nil, apierr.Wrap(apierr.CodeInternal, "could not claim expired orders", err)
+	if err := db.First(&order).Error; err != nil {
+		return model.Order{}, translate(err, "expired order not found")
 	}
-	return ids, nil
+	return order, nil
 }
 
 func IsNotFound(err error) bool {

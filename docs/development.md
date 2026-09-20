@@ -67,3 +67,16 @@ pnpm docs:dev
 ```
 
 Docs live at `/`, `/zh/`, `/ja/`; update corresponding pages and sidebar links together. VitePress uses its built-in local search and code highlighting. There is no custom Mermaid renderer: use readable Markdown tables/text for architecture changes rather than relying on diagrams that render as code blocks.
+
+## Feature regression checks
+
+`internal/httpapi/favorite_status_test.go` covers user isolation, versioned paths, read-after-remove, authentication, invalid/hidden products and explicit boolean validation. `internal/service/favorite_test.go` checks favorite-list pagination and bounded query counts. SQLite tests establish local rules; PostgreSQL integration requires `TEST_DATABASE_URL` and must be reported separately.
+
+```bash
+go test ./internal/httpapi -run 'TestFavorite'
+go test ./internal/service -run 'TestFavorites'
+go test -race ./...
+go vet ./...
+```
+
+[API](./api.md)

@@ -1,23 +1,25 @@
 # 配置参考
 
-Go 进程只读取环境变量，**不会自动加载** `.env`；本仓库也没有 `.env.development` / `.env.production` 加载器。`.env.example` 是模板。Docker Compose 的 `.env` 只参与 Compose 变量插值（这里主要是 `POSTGRES_PORT`），API 容器的环境变量在 `docker-compose.yml` 中显式配置。原生进程须在 Shell 中 export。`TEST_DATABASE_URL` 仅供 PostgreSQL 集成测试读取，不属于 `config.Load()`。
+服务启动时会先加载当前工作目录中可选的 `.env`，再读取进程环境变量；已有变量（包括显式空值）优先。文件不存在时继续使用环境变量和默认值，文件不可读或语法错误时停止启动。本仓库没有 `.env.development` / `.env.production` 加载器。将 `.env.example` 复制为项目根目录的 `.env`，在文件内配置 `DATABASE_URL` 即可。`.env` 已被 Git 忽略，请勿提交密钥。Docker Compose 的 `.env` 只参与 Compose 变量插值（这里主要是 `POSTGRES_PORT`），API 容器的环境变量在 `docker-compose.yml` 中显式配置。原生开发无需在 Shell 中 export 项目配置。`TEST_DATABASE_URL` 仅供 PostgreSQL 集成测试读取，不属于 `config.Load()`。
 
 配置是**快速失败**的：非法或不安全的值会导致启动中止，而不是静默回退到默认值。
+
+`.env.example` 只保留原生开发需要的连接配置和开发密钥；其他选项省略时使用下表默认值。
 
 ## 完整参考
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `APP_ENV` | `development` | `development` / `test` / `production` 之一。 |
+| `APP_ENV` | `development` | `local` / `development` / `test` / `staging` / `production` 之一。 |
 | `PORT` | `8002` | HTTP 监听端口。 |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` 之一。 |
 | `LOG_FORMAT` | 非生产 `text`，生产 `json` | 生产必须为 `json`。 |
-| `DATABASE_DRIVER` | `postgres` | `postgres` 或 `sqlite`（sqlite 仅用于隔离演示/测试）。 |
+| `DATABASE_DRIVER` | `postgres` | 运行时使用 PostgreSQL；SQLite 仅允许 `APP_ENV=test`。 |
 | `DATABASE_URL` | `postgres://…` | 按驱动指定的 DSN。 |
 | `DB_MAX_OPEN_CONNS` | `25` | 最大打开连接数。 |
 | `DB_MAX_IDLE_CONNS` | `5` | 连接池保留的最大空闲连接数。 |
 | `DB_CONN_MAX_LIFETIME` | `30m` | 连接可被复用的时长。 |
-| `AUTO_MIGRATE` | `true` | 启动时执行 schema 迁移。 |
+| `AUTO_MIGRATE` | staging/production `false`; otherwise `true` | 启动时执行 schema 迁移。 |
 | `SEED` | 非生产 `true`，生产 `false` | 开发写演示数据；生产拒绝 `true`。 |
 | `JWT_SECRET` | dev 占位符 | **必须**与 AI 服务一致，至少 32 字符。 |
 | `JWT_ISSUER` | `vue-h5-template` | `iss` 声明；必须与 AI 服务一致。 |
@@ -32,7 +34,7 @@ Go 进程只读取环境变量，**不会自动加载** `.env`；本仓库也没
 | `RATE_LIMIT_BURST` | `40` | 每 IP 的桶容量。 |
 | `ORDER_PAYMENT_TTL` | `15m` | 待支付订单预占期限。 |
 | `ORDER_EXPIRATION_INTERVAL` | `30s` | 订单超时 Worker 间隔。 |
-| `ORDER_EXPIRATION_BATCH_SIZE` | `100` | 每批最多领取订单数（上限 1000）。 |
+| `ORDER_EXPIRATION_BATCH_SIZE` | `100` | 每轮最多尝试的订单数（最大 1000）；每单独立事务。 |
 | `MOCK_PAYMENT_WEBHOOK_SECRET` | 开发占位符 | Mock 回调 HMAC 密钥；生产必须更换且至少 32 字符。 |
 | `REDIS_URL` | 空 | 可选的商品目录 Redis 缓存；为空即关闭。 |
 | `PRODUCT_CACHE_TTL` | `5m` | 商品目录缓存寿命。 |
@@ -53,10 +55,12 @@ Go 进程只读取环境变量，**不会自动加载** `.env`；本仓库也没
 
 这是刻意的：一个配置错误却能启动的服务，远比一个启动即崩溃的服务危险得多。
 
-## 隔离运行用 SQLite
+## 配置解析与资源限制
 
-`DATABASE_DRIVER=sqlite` 用于演示和隔离测试，此时无需完整 PostgreSQL。**不建议**用于生产环境。
+只有未设置的变量才使用默认值。整数、布尔值和时长如果显式为空或格式错误，会阻止启动；空 `DATABASE_URL` 同样被拒绝。端口必须在 1–65535 内（仅测试允许 `0`），数据库空闲连接数不能超过最大连接数，HTTP 与关闭超时必须为正值。限流参数拒绝 NaN 和无穷大，日志等级与格式必须使用上表支持的值。
 
-```bash
-DATABASE_DRIVER=sqlite DATABASE_URL=/tmp/vue-h5-business.db make run
-```
+## 隔离测试用 SQLite
+
+SQLite 仅允许 `APP_ENV=test`，开发与生产运行均使用 PostgreSQL。包内 SQLite 测试需要启用 CGO。行锁与并发结算测试要求 `TEST_DATABASE_URL` 指向专用 PostgreSQL 数据库；每个测试创建并清理自己的独立 schema。
+
+部署配置与迁移/刷新会话升级见[生产行为](/zh/production)。支持本地 `local`，`staging` 采用生产安全校验。`AUTO_MIGRATE` 在 staging/production 默认 false，其他环境默认 true。`DB_CONN_MAX_IDLE_TIME` 默认 5m；`REQUEST_TIMEOUT` 默认 10s，必须小于 `WRITE_TIMEOUT`。

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -47,6 +48,9 @@ func NewProductCache(redisURL string, ttl time.Duration) (ProductCache, error) {
 	options.DialTimeout = 300 * time.Millisecond
 	options.ReadTimeout = 200 * time.Millisecond
 	options.WriteTimeout = 200 * time.Millisecond
+	options.PoolTimeout = 200 * time.Millisecond
+	options.MaxRetries = -1
+	options.ContextTimeoutEnabled = true
 	return &RedisProductCache{client: redis.NewClient(options), ttl: ttl}, nil
 }
 
@@ -67,11 +71,21 @@ func (c *RedisProductCache) Get(ctx context.Context, id uint) (model.Product, bo
 }
 
 func (c *RedisProductCache) Set(ctx context.Context, product model.Product) error {
+	// Never store live inventory, even when another caller supplies it.
+	product.SKUs = append([]model.ProductSKU(nil), product.SKUs...)
+	for i := range product.SKUs {
+		product.SKUs[i].Inventory = nil
+	}
 	value, err := json.Marshal(product)
 	if err != nil {
 		return fmt.Errorf("encode product cache: %w", err)
 	}
-	return c.client.Set(ctx, productKey(product.ID), value, c.ttl).Err()
+	ttl := c.ttl
+	if jitter := int64(ttl / 5); jitter > 0 {
+		// #nosec G404 -- expiry jitter is not a credential or security decision.
+		ttl += time.Duration(rand.Int64N(jitter))
+	}
+	return c.client.Set(ctx, productKey(product.ID), value, ttl).Err()
 }
 
 func (c *RedisProductCache) Delete(ctx context.Context, id uint) error {

@@ -222,3 +222,35 @@ func TestCancelRejectsPaidOrForeignOrder(t *testing.T) {
 	_, err = fixture.services.Orders.Cancel(ctx, fixture.userID, order.ID)
 	require.Error(t, err)
 }
+
+func TestExpirationFailureDoesNotRollbackOtherOrders(t *testing.T) {
+	fixture := newCommerceFixture(t)
+	ctx := context.Background()
+	orders := make([]model.Order, 2)
+	skus := make([]model.ProductSKU, 2)
+	require.NoError(t, fixture.db.Order("id ASC").Limit(2).Find(&skus).Error)
+	require.NotZero(t, skus[1].ID)
+	for index, sku := range skus {
+		_, err := fixture.services.Cart.Add(ctx, fixture.userID, sku.ID, 1)
+		require.NoError(t, err)
+		orders[index], _, err = fixture.services.Orders.Create(ctx, fixture.userID, fmt.Sprintf("expire-independent-%d", index), CreateOrderInput{})
+		require.NoError(t, err)
+		require.NoError(t, fixture.db.Model(&model.Order{}).Where("id = ?", orders[index].ID).
+			Update("expires_at", time.Now().UTC().Add(time.Duration(index-2)*time.Hour)).Error)
+	}
+	// Simulate one inconsistent reservation. That order must stay untouched,
+	// while the valid order still releases its stock and expires.
+	require.NoError(t, fixture.db.Model(&model.Inventory{}).Where("sku_id = ?", skus[0].ID).Update("reserved", 0).Error)
+	count, err := fixture.services.Orders.ExpireBatch(ctx)
+	require.Error(t, err)
+	assert.Equal(t, 1, count)
+	first, err := fixture.services.Orders.Get(ctx, fixture.userID, orders[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderPendingPayment, first.Status)
+	second, err := fixture.services.Orders.Get(ctx, fixture.userID, orders[1].ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.OrderExpired, second.Status)
+	inventory, err := fixture.repo.Inventory(ctx, skus[1].ID)
+	require.NoError(t, err)
+	assert.Zero(t, inventory.Reserved)
+}

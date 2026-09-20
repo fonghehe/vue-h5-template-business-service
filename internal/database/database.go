@@ -3,6 +3,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,12 +26,15 @@ type Options struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
+	RequireSchema   bool
 	// AutoMigrate applies pending schema migrations.
 	AutoMigrate bool
 	// Seed loads demo data when tables are empty.
 	Seed bool
 	// Quiet suppresses GORM's own SQL logging; the access log already covers it.
-	Quiet bool
+	Quiet  bool
+	Logger gormlogger.Interface
 }
 
 // OptionsFromConfig derives database options from service configuration.
@@ -41,6 +45,8 @@ func OptionsFromConfig(cfg config.Config) Options {
 		MaxOpenConns:    cfg.DBMaxOpenConns,
 		MaxIdleConns:    cfg.DBMaxIdleConns,
 		ConnMaxLifetime: cfg.DBConnMaxLifetime,
+		ConnMaxIdleTime: cfg.DBConnMaxIdleTime,
+		RequireSchema:   !cfg.AutoMigrate,
 		AutoMigrate:     cfg.AutoMigrate,
 		Seed:            cfg.Seed,
 	}
@@ -57,26 +63,50 @@ func Open(opts Options) (*gorm.DB, error) {
 		return nil, err
 	}
 
+	queryLogger := opts.Logger
+	if queryLogger == nil {
+		queryLogger = gormlogger.Default.LogMode(logLevel(opts.Quiet))
+	}
 	db, err := gorm.Open(dialector, &gorm.Config{
-		Logger:                                   gormlogger.Default.LogMode(logLevel(opts.Quiet)),
-		TranslateError:                           true,
-		PrepareStmt:                              false,
-		DisableForeignKeyConstraintWhenMigrating: false,
+		DisableAutomaticPing: true,
+		Logger:               queryLogger,
+		TranslateError:       true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
-	if err := configurePool(db, opts); err != nil {
-		return nil, err
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("access connection pool: %w", err)
 	}
-	// Even when migrations are disabled, do not serve against a database owned
-	// by another application that happens to have users/products tables.
-	if err := rejectIncompatibleSchema(db); err != nil {
-		return nil, err
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = sqlDB.Close()
+		}
+	}()
+	sqlDB.SetMaxOpenConns(opts.MaxOpenConns)
+	sqlDB.SetMaxIdleConns(opts.MaxIdleConns)
+	sqlDB.SetConnMaxLifetime(opts.ConnMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(opts.ConnMaxIdleTime)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return nil, fmt.Errorf("ping database: %w", err)
 	}
+	db = db.WithContext(ctx)
 	if opts.AutoMigrate {
 		if err := Migrate(db); err != nil {
+			return nil, err
+		}
+	} else if err := rejectIncompatibleSchema(db); err != nil {
+		// Migrate checks ownership before changing the schema; apply the same
+		// safeguard when migrations are disabled.
+		return nil, err
+	}
+	if opts.RequireSchema {
+		if err := CheckSchema(db); err != nil {
 			return nil, err
 		}
 	}
@@ -85,7 +115,9 @@ func Open(opts Options) (*gorm.DB, error) {
 			return nil, err
 		}
 	}
-	return db, nil
+	initialized = true
+	// Startup context must not become the default context of runtime queries.
+	return db.WithContext(context.Background()), nil
 }
 
 func dialectorFor(driver, dsn string) (gorm.Dialector, error) {
@@ -99,24 +131,13 @@ func dialectorFor(driver, dsn string) (gorm.Dialector, error) {
 	}
 }
 
-func configurePool(db *gorm.DB, opts Options) error {
-	sqlDB, err := db.DB()
-	if err != nil {
-		return fmt.Errorf("access connection pool: %w", err)
-	}
-	sqlDB.SetMaxOpenConns(opts.MaxOpenConns)
-	sqlDB.SetMaxIdleConns(opts.MaxIdleConns)
-	sqlDB.SetConnMaxLifetime(opts.ConnMaxLifetime)
-	return nil
-}
-
 // Ping verifies the database is reachable. Used by the readiness probe.
-func Ping(db *gorm.DB) error {
+func Ping(ctx context.Context, db *gorm.DB) error {
 	sqlDB, err := db.DB()
 	if err != nil {
 		return err
 	}
-	return sqlDB.Ping()
+	return sqlDB.PingContext(ctx)
 }
 
 func logLevel(quiet bool) gormlogger.LogLevel {

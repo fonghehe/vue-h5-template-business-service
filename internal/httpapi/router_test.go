@@ -68,13 +68,7 @@ func newTestServer(t *testing.T) (*Server, *gorm.DB) {
 // do performs a request against a fresh router.
 func (s *Server) do(t *testing.T, method, path string, body string, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
-	var reader *strings.Reader
-	if body == "" {
-		reader = strings.NewReader("")
-	} else {
-		reader = strings.NewReader(body)
-	}
-	request := httptest.NewRequest(method, path, reader)
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	for key, value := range headers {
 		request.Header.Set(key, value)

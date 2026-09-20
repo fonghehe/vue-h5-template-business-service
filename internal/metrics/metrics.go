@@ -3,9 +3,11 @@
 package metrics
 
 import (
+	"database/sql"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -43,10 +45,15 @@ func New() *Metrics {
 		}),
 	}
 	m.registry.MustRegister(
+		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		m.HTTPRequests, m.HTTPRequestDuration, m.OrdersCreated, m.OrdersPaid,
 		m.OrdersExpired, m.InventoryReservationFailed,
 	)
 	return m
+}
+
+func (m *Metrics) RegisterDatabase(db *sql.DB) {
+	m.registry.MustRegister(collectors.NewDBStatsCollector(db, "business"))
 }
 
 func (m *Metrics) Handler() http.Handler {

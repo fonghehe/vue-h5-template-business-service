@@ -28,15 +28,22 @@ docker compose ps
 ## 方式 B —— 从源码运行
 
 ```bash
-# 仅启动 PostgreSQL；宿主机使用 5433，避开现有的 5432 服务。
-POSTGRES_PORT=5433 docker compose up -d postgres
-export DATABASE_URL='postgres://vue_h5:vue_h5_local@127.0.0.1:5433/vue_h5_business?sslmode=disable'
+# 仅首次复制，数据库地址保存在项目配置中。
+cp .env.example .env
+# 可选：没有本地数据库时，用 Compose 提供 PostgreSQL。
+POSTGRES_PORT=5433 docker compose up -d --wait postgres
 go run ./cmd/server
 ```
 
-`make run` 执行相同命令。不要同时启动 Compose 的 `business` 服务，它也占用宿主机 8002 端口。Go 进程**不会自动加载 `.env`**，请在 Shell 导出变量或使用 env-file 工具。`.env.example` 包含 5432 端口的开发凭据，使用上述命令时需把端口改成 5433。原生 API 不用 Redis 时留空 `REDIS_URL`。如果默认 Go 模块代理超时，可先运行 `GOPROXY=https://goproxy.cn go mod download`，并保持仓库的 `go.sum` 校验开启。详见[配置参考](/zh/configuration)。
+`make run` 执行相同命令。不要同时启动 Compose 的 `business` 服务，它也占用宿主机 8002 端口。服务会自动读取当前工作目录的 `.env`，请从项目根目录启动；已有进程环境变量优先。`.env.example` 使用 5433 端口。如果已经安装本地 PostgreSQL，在 `.env` 中把 `DATABASE_URL` 配置为本服务的专用数据库地址，即可省略 Compose 命令。原生 API 不用 Redis 时留空 `REDIS_URL`。如果默认 Go 模块代理超时，可先运行 `GOPROXY=https://goproxy.cn go mod download`，并保持仓库的 `go.sum` 校验开启。详见[配置参考](/zh/configuration)。
 
-不设置 `DATABASE_URL` 时，裸跑 `go run ./cmd/server` 会连接默认的 `localhost:5432`，那里可能是其他应用的数据库。**不要**为了启动本服务去迁移或删除其表；请使用上面的专用 Compose 数据库与导出的连接地址。启动时会在应用迁移前拒绝不兼容的 `users`/`products` 表结构。
+缺少 `.env` 且未指定 `DATABASE_URL` 时，裸跑 `go run ./cmd/server` 会连接默认的 `localhost:5432`，那里可能是其他应用的数据库。**不要**为了启动本服务去迁移或删除其表；请使用专用数据库，并将连接地址保存在项目 `.env` 中。启动时会在应用迁移前拒绝不兼容的 `users`/`products` 表结构。
+
+## 交互式 API 文档
+
+开发环境 Swagger 地址为 `http://localhost:8002/swagger/index.html`。当前 OpenAPI 契约位于 `/openapi.yaml`。页面通过 `github.com/swaggo/gin-swagger` 注册，资源由 `github.com/swaggo/files` 提供，无需独立文档服务或 CDN。中间件直接读取现有 OpenAPI 3 契约，不需要用 `swag init` 另行生成 Swagger 2 文档。`APP_ENV=production` 时不注册这些路由。
+
+通过 `POST /api/auth/login` 使用开发账号 `user` / `123456` 登录，复制 `data.accessToken` 到 **Authorize** 即可调试鉴权接口。管理接口使用 `admin` / `123456`。支付接口为模拟支付，不会真实扣款。
 
 ## 试用 API
 

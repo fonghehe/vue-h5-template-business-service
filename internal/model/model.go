@@ -1,8 +1,7 @@
 // Package model holds the persisted entities of the business service.
 //
-// The JSON field names in this package are part of the public API contract:
-// they mirror the schemas in the frontend's openapi/schema.yaml, so renaming
-// one of them is a breaking change for every client.
+// JSON tags are retained for internal cache serialization. HTTP uses explicit
+// DTOs in internal/httpapi so persistence fields cannot leak into responses.
 package model
 
 import (
@@ -39,16 +38,6 @@ type User struct {
 
 // Roles is a persisted list of role names.
 type Roles []string
-
-// Has reports whether the user carries the given role.
-func (r Roles) Has(role string) bool {
-	for _, candidate := range r {
-		if candidate == role {
-			return true
-		}
-	}
-	return false
-}
 
 // Public strips secret fields and returns the client-facing representation
 // described by the User schema in openapi/schema.yaml.

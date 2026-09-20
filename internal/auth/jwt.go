@@ -10,7 +10,6 @@
 package auth
 
 import (
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"strconv"
@@ -141,7 +140,7 @@ func (i *Issuer) Verify(token string, expected TokenType) (*Claims, error) {
 	if claims.Type != expected {
 		return nil, ErrInvalidToken
 	}
-	if claims.Subject == "" {
+	if _, err := claims.UserID(); err != nil {
 		return nil, ErrInvalidToken
 	}
 	return claims, nil
@@ -150,20 +149,10 @@ func (i *Issuer) Verify(token string, expected TokenType) (*Claims, error) {
 // UserID extracts the numeric subject from verified claims.
 func (c *Claims) UserID() (uint, error) {
 	value, err := strconv.ParseUint(c.Subject, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse token subject %q: %w", c.Subject, err)
+	if err != nil || value == 0 || uint64(uint(value)) != value {
+		return 0, ErrInvalidToken
 	}
 	return uint(value), nil
-}
-
-// HasRole reports whether the claims carry the given role.
-func (c *Claims) HasRole(role string) bool {
-	for _, candidate := range c.Roles {
-		if subtle.ConstantTimeCompare([]byte(candidate), []byte(role)) == 1 {
-			return true
-		}
-	}
-	return false
 }
 
 // Bearer extracts a bearer token from a raw Authorization header value.

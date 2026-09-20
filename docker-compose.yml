@@ -3,21 +3,11 @@ services:
     build: .
     environment:
       APP_ENV: development
-      PORT: "8002"
-      LOG_FORMAT: text
-      DATABASE_DRIVER: postgres
       DATABASE_URL: postgres://vue_h5:vue_h5_local@postgres:5432/vue_h5_business?sslmode=disable
       JWT_SECRET: local-compose-secret-change-in-production
-      JWT_ISSUER: vue-h5-template
-      JWT_AUDIENCE: vue-h5-template-api
       MOCK_PAYMENT_WEBHOOK_SECRET: local-mock-payment-webhook-secret-change-me
       CORS_ORIGINS: http://localhost:5173
-      RATE_LIMIT_ENABLED: "true"
       REDIS_URL: redis://redis:6379/0
-      PRODUCT_CACHE_TTL: 5m
-      ORDER_PAYMENT_TTL: 15m
-      ORDER_EXPIRATION_INTERVAL: 30s
-      ORDER_EXPIRATION_BATCH_SIZE: "100"
     ports:
       - "8002:8002"
     depends_on:

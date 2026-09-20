@@ -16,7 +16,7 @@ func withEnv(t *testing.T, entries map[string]string, fn func()) {
 	previous := os.Environ()
 	os.Clearenv()
 	for key, value := range entries {
-		t.Setenv(key, value)
+		require.NoError(t, os.Setenv(key, value))
 	}
 	defer func() {
 		os.Clearenv()
@@ -166,7 +166,7 @@ func TestValidProductionConfigPasses(t *testing.T) {
 
 func TestUnknownAppEnvIsRejected(t *testing.T) {
 	cfg := validConfig()
-	cfg.AppEnv = "staging"
+	cfg.AppEnv = "preview"
 
 	err := cfg.Validate()
 
@@ -215,10 +215,43 @@ func TestCORSOriginsAreParsedAndTrimmed(t *testing.T) {
 	})
 }
 
-func TestIsProductionOnlyTrueForProduction(t *testing.T) {
-	cfg := validConfig()
-	assert.True(t, cfg.IsProduction())
+func TestMalformedEnvironmentFailsValidation(t *testing.T) {
+	for _, test := range []struct{ key, value string }{
+		{"DB_MAX_OPEN_CONNS", "many"}, {"DB_MAX_OPEN_CONNS", ""},
+		{"RATE_LIMIT_RPS", "fast"}, {"RATE_LIMIT_RPS", "NaN"}, {"RATE_LIMIT_RPS", "+Inf"},
+		{"SEED", "maybe"}, {"AUTO_MIGRATE", ""},
+		{"READ_TIMEOUT", "forever"}, {"DATABASE_URL", ""},
+		{"PORT", "65536"}, {"DB_MAX_IDLE_CONNS", "26"}, {"WRITE_TIMEOUT", "-1s"},
+	} {
+		t.Run(test.key+"="+test.value, func(t *testing.T) {
+			withEnv(t, map[string]string{test.key: test.value}, func() {
+				err := Load().Validate()
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), test.key)
+			})
+		})
+	}
+}
 
-	cfg.AppEnv = EnvTest
-	assert.False(t, cfg.IsProduction())
+func TestStagingUsesProductionSafeguards(t *testing.T) {
+	withEnv(t, map[string]string{"APP_ENV": EnvStaging}, func() {
+		cfg := Load()
+		assert.False(t, cfg.Seed)
+		assert.False(t, cfg.AutoMigrate)
+		assert.True(t, cfg.RefreshCookieSecure)
+		assert.Equal(t, "json", cfg.LogFormat)
+		require.Error(t, cfg.Validate())
+	})
+	cfg := validConfig()
+	cfg.AppEnv = EnvStaging
+	require.NoError(t, cfg.Validate())
+}
+func TestCORSRejectsMalformedAndAllLoopbackForms(t *testing.T) {
+	for _, origin := range []string{"https://[::1]:443", "https://127.1.2.3", "https://localhost.", "https://test.localhost", "https://[::]", "https://example.com/path", "https://user:password@example.com", "https://example.com?q=x", "invalid"} {
+		t.Run(origin, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.CORSOrigins = []string{origin}
+			require.Error(t, cfg.Validate())
+		})
+	}
 }

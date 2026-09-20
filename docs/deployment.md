@@ -1,5 +1,7 @@
 # Deployment
 
+The server is built with `CGO_ENABLED=0`; the image uses PostgreSQL. SQLite tests run separately with CGO enabled.
+
 ## Build the image
 
 The image is multi-stage and runs as a **non-root** user, with the build version injected at compile time.
@@ -32,7 +34,6 @@ The checked-in Compose file is a **development** stack: API, PostgreSQL 17 (pers
 - **Pin `CORS_ORIGINS`** to the real frontend domain(s). Production startup rejects `*` and loopback origins.
 - **Use JSON logs** (`LOG_FORMAT=json`) and ship them to your collector.
 - **Disable development data** (`SEED=false`); startup rejects `SEED=true` in production. Provision real users/coupons through an approved operational path; there is no public registration or coupon-admin endpoint.
-- **Coordinate migrations**: `AUTO_MIGRATE=true` runs recorded migrations on startup; designate one migration owner or run them ahead of replicas. Existing Product rows get a default SKU/inventory via a data migration even with seeding off.
 - **Use PostgreSQL as source of truth**. Redis is optional catalogue caching. The in-process IP limiter is per replica; put shared/edge limiting in front of multiple replicas.
 - **Constrain `/metrics` at the edge** if needed; the route has no JWT middleware. It exposes HTTP request totals/duration, orders created/paid/expired and inventory reservation failures.
 - **Treat payments as a mock**. HMAC callbacks do not settle funds; a real provider needs its own signature verification, event semantics and reconciliation.
@@ -51,3 +52,5 @@ GitHub Actions runs on every PR and push to `main`: format check, `go vet`, `go 
 `golangci-lint`, and a Docker image build against a PostgreSQL service container.
 
 The separate `deploy-docs.yml` workflow uses pnpm, type-checks VitePress config, builds all three locales and uploads `docs/.vitepress/dist` to GitHub Pages. A successful build does not by itself prove Pages is enabled or publicly reachable.
+
+Deployment settings and migration/refresh-session rollout are described in [Production behavior](/production). `local` is supported for local development; `staging` applies production safeguards. `AUTO_MIGRATE` defaults to false in staging/production and true elsewhere. `DB_CONN_MAX_IDLE_TIME` defaults to 5m; `REQUEST_TIMEOUT` defaults to 10s and must be less than `WRITE_TIMEOUT`.

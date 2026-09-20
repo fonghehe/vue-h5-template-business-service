@@ -1,5 +1,7 @@
 # デプロイ
 
+サーバーは `CGO_ENABLED=0` でビルドし、コンテナでは PostgreSQL を使用します。SQLite の隔離テストはコンテナ外で CGO を有効にして実行します。
+
 ## イメージのビルド
 
 イメージはマルチステージで、**非 root** ユーザーとして動作し、ビルドバージョンがコンパイル時に注入されます。
@@ -31,7 +33,6 @@ docker compose up -d --build
 - **`CORS_ORIGINS` を実際のフロントエンドドメインに固定**。本番起動は `*` とループバックオリジンを拒否します。
 - **JSON ログを使う**（`LOG_FORMAT=json`）してコレクターに送る。
 - **デモデータを無効化**（`SEED=false`）。本番では `true` の起動を拒否します。実ユーザー/クーポンは承認済みの運用経路で準備してください。公開登録やクーポン管理 API はありません。
-- **マイグレーションを調整**：`AUTO_MIGRATE=true` は起動時に記録済み移行を実行します。複数レプリカでは移行担当を一つにするか事前実行します。既存 Product は Seed 無効でもデータ移行でデフォルト SKU/在庫を得ます。
 - **PostgreSQL を基準にする**：Redis は任意の商品キャッシュです。IP 制限はインスタンス内だけなので、複数レプリカには共有エッジ制限を設けます。
 - **`/metrics` を必要に応じて制限**：ルート自体に JWT はありません。HTTP 件数/時間、注文作成/支払/期限切れ、在庫確保失敗を監視できます。
 - **決済は Mock**：HMAC コールバックは実際の資金決済ではありません。実事業者の署名、イベント意味、照合が別途必要です。
@@ -47,3 +48,5 @@ docker compose up -d --build
 
 GitHub Actions は `main` へのすべての PR と push で実行されます：フォーマットチェック、`go vet`、カバレッジ付き
 `go test -race`、`golangci-lint`、PostgreSQL サービスコンテナを使う並行テスト、Docker ビルドです。別の `deploy-docs.yml` は pnpm で三言語 VitePress を型検査・ビルドし GitHub Pages にアップロードします。ビルド成功だけでは Pages の公開状態を証明しません。
+
+移行と更新セッションの公開手順は[本番動作](/ja/production)を参照。`local` に対応し、`staging` は本番安全検証を適用します。`AUTO_MIGRATE` は staging/production で false、他では true。`DB_CONN_MAX_IDLE_TIME` は 5m、`REQUEST_TIMEOUT` は 10s で `WRITE_TIMEOUT` より短くします。

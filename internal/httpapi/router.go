@@ -25,6 +25,7 @@ import (
 // Server wires the service container into a Gin engine.
 type Server struct {
 	services *service.Container
+	auth     AuthAPI
 	config   config.Config
 	db       *gorm.DB
 	logger   *slog.Logger
@@ -41,8 +42,13 @@ func New(cfg config.Config, db *gorm.DB, logger *slog.Logger) *Server {
 		cache = productcache.NoopProductCache{}
 	}
 	metricSet := metrics.New()
+	if pool, err := db.DB(); err == nil {
+		metricSet.RegisterDatabase(pool)
+	}
+	services := service.New(cfg, db, logger, cache, metricSet)
 	return &Server{
-		services: service.New(cfg, db, logger, cache, metricSet),
+		services: services,
+		auth:     services.Auth,
 		config:   cfg,
 		db:       db,
 		logger:   logger,
@@ -65,30 +71,36 @@ func (s *Server) Router() *gin.Engine {
 	router.Use(
 		middleware.RequestID(),
 		middleware.SecurityHeaders(),
-		middleware.Recovery(s.logger),
 		middleware.AccessLog(s.logger),
 		middleware.Prometheus(s.metrics),
+		middleware.Recovery(s.logger),
+		middleware.Timeout(s.config.RequestTimeout),
 		middleware.CORS(s.config.CORSOrigins),
-		middleware.BodyLimit(s.config),
+		middleware.BodyLimit(),
 	)
 
 	// Liveness and readiness are unauthenticated: orchestrators poll them.
 	router.GET("/health", s.health)
 	router.GET("/ready", s.ready)
 	router.GET("/metrics", gin.WrapH(s.metrics.Handler()))
+	registerSwagger(router, s.config.AppEnv)
 
-	api := router.Group("/api")
-	api.GET("/health", s.health)
-	if s.config.RateLimitEnabled {
-		limiter := middleware.NewRateLimit(s.config.RateLimitRPS, s.config.RateLimitBurst)
-		api.Use(limiter.Handler())
+	// Share limiters across the legacy and versioned routes so aliases cannot
+	// multiply a client's allowance.
+	limiter := middleware.NewRateLimit(s.config.RateLimitRPS, s.config.RateLimitBurst)
+	authLimiter := middleware.NewRateLimit(0.5, 5)
+	for _, prefix := range []string{"/api", "/api/v1"} {
+		api := router.Group(prefix)
+		api.GET("/health", s.health)
+		if s.config.RateLimitEnabled {
+			api.Use(limiter.Handler())
+		}
+		s.registerAuthRoutes(api, authLimiter)
+		s.registerUserRoutes(api)
+		s.registerProductRoutes(api)
+		s.registerCommerceRoutes(api)
+		s.registerAdminRoutes(api)
 	}
-
-	s.registerAuthRoutes(api)
-	s.registerUserRoutes(api)
-	s.registerProductRoutes(api)
-	s.registerCommerceRoutes(api)
-	s.registerAdminRoutes(api)
 
 	// Gin answers unknown paths with a plain text 404 by default. An API that
 	// sometimes returns HTML breaks every client's JSON parser, so unknown
@@ -102,7 +114,7 @@ func (s *Server) Router() *gin.Engine {
 
 func (s *Server) registerCommerceRoutes(api *gin.RouterGroup) {
 	authenticated := api.Group("")
-	authenticated.Use(middleware.Authenticate(s.services.Auth))
+	authenticated.Use(middleware.Authenticate(s.auth))
 
 	cart := authenticated.Group("/cart")
 	cart.GET("", s.getCart)
@@ -134,10 +146,16 @@ func (s *Server) StartWorkers(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				expired, err := s.services.Orders.ExpireBatch(ctx)
+				batchCtx, cancel := context.WithTimeout(ctx, s.config.RequestTimeout)
+				if err := s.services.Auth.CleanupSessions(batchCtx); err != nil && ctx.Err() == nil {
+					s.logger.Error("session cleanup failed", "error", err)
+				}
+				expired, err := s.services.Orders.ExpireBatch(batchCtx)
+				cancel()
 				if err != nil && ctx.Err() == nil {
 					s.logger.Error("order expiration worker failed", "error", err)
-				} else if expired > 0 {
+				}
+				if expired > 0 {
 					s.logger.Info("order expiration batch completed", "expired", expired)
 				}
 			}
@@ -150,8 +168,11 @@ func (s *Server) WaitWorkers() { s.workerWG.Wait() }
 func (s *Server) Close() error { return s.cache.Close() }
 
 // registerAuthRoutes mounts the public authentication endpoints.
-func (s *Server) registerAuthRoutes(api *gin.RouterGroup) {
+func (s *Server) registerAuthRoutes(api *gin.RouterGroup, limiter *middleware.RateLimit) {
 	auth := api.Group("/auth")
+	if s.config.RateLimitEnabled {
+		auth.Use(limiter.Handler())
+	}
 	auth.POST("/login", s.login)
 	auth.POST("/logout", s.logout)
 	auth.POST("/refresh", s.refresh)
@@ -160,7 +181,7 @@ func (s *Server) registerAuthRoutes(api *gin.RouterGroup) {
 // registerUserRoutes mounts endpoints that require an access token.
 func (s *Server) registerUserRoutes(api *gin.RouterGroup) {
 	user := api.Group("/user")
-	user.Use(middleware.Authenticate(s.services.Auth))
+	user.Use(middleware.Authenticate(s.auth))
 	user.GET("/info", s.userInfo)
 	user.GET("/favorites", s.listFavorites)
 }
@@ -173,7 +194,8 @@ func (s *Server) registerProductRoutes(api *gin.RouterGroup) {
 	product.GET("/detail", s.productDetail)
 
 	toggle := product.Group("")
-	toggle.Use(middleware.Authenticate(s.services.Auth))
+	toggle.Use(middleware.Authenticate(s.auth))
+	toggle.GET("/favorite", s.favoriteStatus)
 	toggle.POST("/favorite", s.toggleFavorite)
 }
 
@@ -181,7 +203,7 @@ func (s *Server) registerProductRoutes(api *gin.RouterGroup) {
 // routes that can mutate products and are gated on the admin role.
 func (s *Server) registerAdminRoutes(api *gin.RouterGroup) {
 	admin := api.Group("/admin")
-	admin.Use(middleware.Authenticate(s.services.Auth), middleware.RequireRole("admin"))
+	admin.Use(middleware.Authenticate(s.auth), middleware.RequireRole("admin"))
 	admin.GET("/products", s.adminListProducts)
 	admin.POST("/products", s.adminCreateProduct)
 	admin.GET("/products/:id", s.adminGetProduct)
@@ -206,10 +228,12 @@ func (s *Server) health(c *gin.Context) {
 // ready is the readiness probe. It fails while the database is unreachable so
 // that load balancers stop routing traffic to this instance.
 func (s *Server) ready(c *gin.Context) {
-	if err := database.Ping(s.db); err != nil {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	if err := database.Ping(ctx, s.db); err != nil {
 		s.logger.Warn("readiness probe failed", "error", err,
 			"requestId", c.GetString(response.ContextKeyRequestID))
-		response.Fail(c, serviceUnavailable(err))
+		response.Fail(c, apierr.Unavailable("Service temporarily unavailable"))
 		return
 	}
 	response.OK(c, gin.H{"service": "business", "status": "ready", "database": "up"})

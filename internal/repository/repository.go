@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/fonghehe/vue-h5-template-business-service/internal/apierr"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/model"
@@ -166,8 +167,18 @@ func (r *ProductRepository) Create(ctx context.Context, product *model.Product) 
 
 // Save persists changes to an existing product.
 func (r *ProductRepository) Save(ctx context.Context, product *model.Product) error {
-	if err := r.db.WithContext(ctx).Save(product).Error; err != nil {
+	result := r.db.WithContext(ctx).Model(&model.Product{}).Where("id = ?", product.ID).
+		Updates(map[string]any{
+			"name": product.Name, "category_id": product.CategoryID, "brand": product.Brand, "cover": product.Cover,
+			"title": product.Title, "img_url": product.ImgURL, "price": product.Price, "vip_price": product.VipPrice,
+			"shop_desc": product.ShopDesc, "delivery": product.Delivery, "shop_name": product.ShopName,
+			"description": product.Description, "stock": product.Stock, "featured": product.Featured, "status": product.Status, "search_text": product.SearchText,
+		})
+	if err := result.Error; err != nil {
 		return translate(err, "could not update product")
+	}
+	if result.RowsAffected != 1 {
+		return apierr.NotFound("product not found")
 	}
 	return nil
 }
@@ -184,9 +195,7 @@ func (r *ProductRepository) Delete(ctx context.Context, product *model.Product) 
 // Unknown tokens fall back to featured-first ordering so that a crafted query
 // string can never change the sort in an unexpected way.
 //
-// Prices are stored as strings to avoid floating point drift on the client, so
-// sorting casts to REAL — the only numeric cast name both PostgreSQL and
-// SQLite accept with identical semantics.
+// Sorting uses canonical integer SKU prices rather than legacy display strings.
 func orderFor(sort string) string {
 	switch sort {
 	case "price_asc":
@@ -217,14 +226,12 @@ type FavoriteRepository struct {
 // NewFavoriteRepository builds a favorite repository.
 func NewFavoriteRepository(db *gorm.DB) *FavoriteRepository { return &FavoriteRepository{db: db} }
 
-// Exists reports whether a bookmark is present.
-func (r *FavoriteRepository) Exists(ctx context.Context, userID, productID uint) (bool, error) {
+// Has reads one user's bookmark without loading a product or the full list.
+func (r *FavoriteRepository) Has(ctx context.Context, userID, productID uint) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Model(&model.Favorite{}).
-		Where("user_id = ? AND product_id = ?", userID, productID).
-		Count(&count).Error
-	if err != nil {
-		return false, apierr.Wrap(apierr.CodeInternal, "could not read favorites", err)
+	if err := r.db.WithContext(ctx).Model(&model.Favorite{}).
+		Where("user_id = ? AND product_id = ?", userID, productID).Count(&count).Error; err != nil {
+		return false, apierr.Wrap(apierr.CodeInternal, "could not load favorite", err)
 	}
 	return count > 0, nil
 }
@@ -233,11 +240,11 @@ func (r *FavoriteRepository) Exists(ctx context.Context, userID, productID uint)
 func (r *FavoriteRepository) Set(ctx context.Context, userID, productID uint, favorite bool) (bool, error) {
 	if favorite {
 		record := model.Favorite{UserID: userID, ProductID: productID}
-		// Upsert so that a double submit cannot raise a duplicate key error.
-		err := r.db.WithContext(ctx).
-			Where(model.Favorite{UserID: userID, ProductID: productID}).
-			Assign(model.Favorite{UserID: userID, ProductID: productID}).
-			FirstOrCreate(&record).Error
+		// A unique index arbitrates concurrent toggles; FirstOrCreate performs
+		// a read then insert and can still lose a race against another request.
+		err := r.db.WithContext(ctx).Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "user_id"}, {Name: "product_id"}}, DoNothing: true,
+		}).Create(&record).Error
 		if err != nil {
 			return false, apierr.Wrap(apierr.CodeInternal, "could not save favorite", err)
 		}
@@ -251,17 +258,22 @@ func (r *FavoriteRepository) Set(ctx context.Context, userID, productID uint, fa
 	return false, nil
 }
 
-// ListProductIDs returns every product the user bookmarked, newest first.
-func (r *FavoriteRepository) ListProductIDs(ctx context.Context, userID uint) ([]uint, error) {
-	var ids []uint
-	err := r.db.WithContext(ctx).Model(&model.Favorite{}).
-		Where("user_id = ?", userID).
-		Order("id DESC").
-		Pluck("product_id", &ids).Error
-	if err != nil {
-		return nil, apierr.Wrap(apierr.CodeInternal, "could not load favorites", err)
+// ListProducts paginates the joined relation in SQL. Soft-deleted products
+// are excluded from both the count and the page; associations load in batches.
+func (r *FavoriteRepository) ListProducts(ctx context.Context, userID uint, page, pageSize int) ([]model.Product, int64, error) {
+	db := r.db.WithContext(ctx).Model(&model.Product{}).
+		Joins("JOIN favorites ON favorites.product_id = products.id").
+		Where("favorites.user_id = ?", userID)
+	var total int64
+	if err := db.Count(&total).Error; err != nil {
+		return nil, 0, apierr.Wrap(apierr.CodeInternal, "could not count favorites", err)
 	}
-	return ids, nil
+	var products []model.Product
+	if err := db.Preload("SKUs").Preload("SKUs.Inventory").Order("favorites.id DESC").
+		Offset((page - 1) * pageSize).Limit(pageSize).Find(&products).Error; err != nil {
+		return nil, 0, apierr.Wrap(apierr.CodeInternal, "could not load favorites", err)
+	}
+	return products, total, nil
 }
 
 // translate maps a GORM error onto an application error.
@@ -274,4 +286,19 @@ func translate(err error, notFoundMessage string) error {
 	default:
 		return apierr.Wrap(apierr.CodeInternal, "database request failed", err)
 	}
+}
+
+func (r *ProductRepository) Transaction(ctx context.Context, fn func(*ProductRepository) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error { return fn(NewProductRepository(tx)) })
+}
+func (r *ProductRepository) LockByID(ctx context.Context, id uint) (model.Product, error) {
+	var product model.Product
+	db := r.db.WithContext(ctx)
+	if db.Name() == "postgres" {
+		db = db.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	if err := db.First(&product, id).Error; err != nil {
+		return model.Product{}, translate(err, "product not found")
+	}
+	return product, nil
 }
