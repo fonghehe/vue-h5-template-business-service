@@ -123,6 +123,17 @@ func (r *ProductRepository) FindByID(ctx context.Context, id uint) (model.Produc
 	return product, nil
 }
 
+// RequirePublic checks current catalogue visibility without loading associations.
+// It also excludes soft-deleted products through GORM's default scope.
+func (r *ProductRepository) RequirePublic(ctx context.Context, id uint) error {
+	var product model.Product
+	if err := r.db.WithContext(ctx).Select("id").
+		Where("status = ?", model.StatusOnSale).First(&product, id).Error; err != nil {
+		return translate(err, "product not found")
+	}
+	return nil
+}
+
 // FindPublicByID returns a product only when it is on sale.
 func (r *ProductRepository) FindPublicByID(ctx context.Context, id uint) (model.Product, error) {
 	var product model.Product

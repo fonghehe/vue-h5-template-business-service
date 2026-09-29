@@ -89,3 +89,9 @@ go test -race ./...
 The SQLite tests cover rule-level rollback, coupons, idempotency, webhook replay and state transitions. The PostgreSQL concurrency tests require `TEST_DATABASE_URL`; CI supplies it. `TestPostgresConcurrentOrdersNeverOversell` uses 100 users, 100 carts and stock 10, then checks that exactly 10 orders commit and stock never goes negative. See [Development](/development) for the test setup and [Deployment](/deployment) for operational limits.
 
 Additional regression tests cover same-cart concurrent checkouts, cart additions during checkout, payment expiry after lock waits, failure isolation during expiration, and pool cleanup after failed database initialization.
+
+## Cache visibility and lean bookmark reads
+
+A catalogue cache hit still checks the product's current sale/deletion state in PostgreSQL using an ID-only query. If cache deletion fails or a read refills an old entry during an update, draft, sold-out and soft-deleted products remain unavailable through public detail reads. Inventory is still fetched fresh. Other cached catalogue fields and SKU metadata can remain stale until TTL; this check does not provide fully consistent catalogue snapshots.
+
+Bookmark status and writes use the same lightweight visibility check without preloading SKU associations. Status requires two read queries (visibility and saved state); saving a bookmark requires one visibility read plus the write. These checks use the request context and preserve cancellation.

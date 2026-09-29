@@ -332,7 +332,13 @@ func (s *ProductService) Detail(ctx context.Context, id uint) (model.Product, er
 	if err != nil {
 		s.logger.WarnContext(ctx, "product cache read failed", "productId", id, "error", err)
 	}
-	if !found || err != nil {
+	if found && err == nil {
+		// Invalidation can fail or race a cache refill. PostgreSQL remains the
+		// authority for visibility even when cached catalogue data is usable.
+		if err := s.products.RequirePublic(ctx, id); err != nil {
+			return model.Product{}, err
+		}
+	} else {
 		product, err = s.products.FindPublicByID(ctx, id)
 		if err != nil {
 			return model.Product{}, err
@@ -606,7 +612,7 @@ func NewFavoriteService(products *repository.ProductRepository, favorites *repos
 
 // Status only exposes bookmarks for a publicly visible product.
 func (s *FavoriteService) Status(ctx context.Context, userID, productID uint) (FavoriteResult, error) {
-	if _, err := s.products.FindPublicByID(ctx, productID); err != nil {
+	if err := s.products.RequirePublic(ctx, productID); err != nil {
 		return FavoriteResult{}, err
 	}
 	favorite, err := s.favorites.Has(ctx, userID, productID)
@@ -619,7 +625,7 @@ func (s *FavoriteService) Status(ctx context.Context, userID, productID uint) (F
 // Set toggles a bookmark, verifying the product exists and is visible first.
 func (s *FavoriteService) Set(ctx context.Context, userID, productID uint, favorite bool) (FavoriteResult, error) {
 	// Reject bookmarks for products the caller could not see anyway.
-	if _, err := s.products.FindPublicByID(ctx, productID); err != nil {
+	if err := s.products.RequirePublic(ctx, productID); err != nil {
 		return FavoriteResult{}, err
 	}
 	state, err := s.favorites.Set(ctx, userID, productID, favorite)
