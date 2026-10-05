@@ -224,10 +224,11 @@ func orderFor(sort string) string {
 
 // escapeLike neutralises wildcards in user supplied keywords so that a search
 // for "50%" does not turn into a full-table scan.
-func escapeLike(value string) string {
-	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return replacer.Replace(value)
-}
+func escapeLike(value string) string { return likeEscaper.Replace(value) }
+
+// Replacer is safe for concurrent use; building its lookup table per search
+// needlessly allocates several kilobytes even for a keyword without wildcards.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // FavoriteRepository persists user bookmarks.
 type FavoriteRepository struct {

@@ -6,7 +6,21 @@
 # Build artifacts
 bin/
 coverage.out
+coverage.html
+coverage/
 *.test
+*.prof
+*.pprof
+
+# Local logs
+*.log
+logs/
+
+# Local optimization artifacts; keep AGENTS.md, AGENT.md and reusable agent/skill guides versioned
+/docs/superpowers/plans/*-backend-optimization.md
+/benchmarks/
+/docs/**/optimization-report.md
+/docs/zh/refactor-report.md
 
 # Local data (SQLite demos/tests)
 data/

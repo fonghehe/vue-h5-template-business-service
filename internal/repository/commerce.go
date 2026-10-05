@@ -237,16 +237,19 @@ func (r *CommerceRepository) LockCouponByCode(ctx context.Context, code string) 
 
 func (r *CommerceRepository) CouponUsageCounts(ctx context.Context, couponID, userID uint) (int64, int64, error) {
 	active := []string{model.CouponUsageReserved, model.CouponUsageConsumed}
-	var total, byUser int64
-	base := r.db.WithContext(ctx).Model(&model.CouponUsage{}).
-		Where("coupon_id = ? AND status IN ?", couponID, active)
-	if err := base.Count(&total).Error; err != nil {
+	var counts struct {
+		Total  int64
+		ByUser int64
+	}
+	// One statement avoids a second database round trip while the service
+	// holds the coupon lock. COALESCE preserves zero counts for unused coupons.
+	err := r.db.WithContext(ctx).Model(&model.CouponUsage{}).
+		Select("COUNT(*) AS total, COALESCE(SUM(CASE WHEN user_id = ? THEN 1 ELSE 0 END), 0) AS by_user", userID).
+		Where("coupon_id = ? AND status IN ?", couponID, active).Scan(&counts).Error
+	if err != nil {
 		return 0, 0, apierr.Wrap(apierr.CodeInternal, "could not validate coupon usage", err)
 	}
-	if err := base.Where("user_id = ?", userID).Count(&byUser).Error; err != nil {
-		return 0, 0, apierr.Wrap(apierr.CodeInternal, "could not validate coupon user limit", err)
-	}
-	return total, byUser, nil
+	return counts.Total, counts.ByUser, nil
 }
 
 func (r *CommerceRepository) CreateOrder(ctx context.Context, order *model.Order, items []model.OrderItem, history model.OrderStatusHistory) error {
