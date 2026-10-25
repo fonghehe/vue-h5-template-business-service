@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strconv"
@@ -214,7 +215,10 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.JWTIssuer) == "" || strings.TrimSpace(c.JWTAudience) == "" {
 		return fmt.Errorf("JWT_ISSUER and JWT_AUDIENCE are required")
 	}
-	if c.RefreshCookieName == "" || strings.ContainsAny(c.RefreshCookieName, " \t\r\n;=,") {
+	// Validate the name using the same grammar as net/http. This cookie is
+	// never sent; middleware sets the configured flags on actual responses.
+	refreshCookie := http.Cookie{Name: c.RefreshCookieName, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}
+	if err := refreshCookie.Valid(); err != nil {
 		return fmt.Errorf("REFRESH_COOKIE_NAME must be a valid cookie name")
 	}
 	for _, origin := range c.CORSOrigins {

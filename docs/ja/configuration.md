@@ -26,7 +26,7 @@
 | `JWT_AUDIENCE` | `vue-h5-template-api` | `aud` クレーム。AI サービスと一致させる。 |
 | `ACCESS_TOKEN_TTL` | `2h` | アクセストークンの有効期間。 |
 | `REFRESH_TOKEN_TTL` | `336h` | リフレッシュトークンの有効期間（`ACCESS_TOKEN_TTL` より長く）。 |
-| `REFRESH_COOKIE_NAME` | `vh5_refresh` | リフレッシュトークンを運ぶ HttpOnly Cookie。 |
+| `REFRESH_COOKIE_NAME` | `vh5_refresh` | リフレッシュトークンを運ぶ HttpOnly Cookie。名前が Go net/http の検証に失敗すると起動しません。 |
 | `REFRESH_COOKIE_SECURE` | 本番以外 `false`、本番 `true` | リフレッシュ Cookie に `Secure` を付与。 |
 | `CORS_ORIGINS` | `http://localhost:5173,…` | カンマ区切りのブラウザオリジン許可リスト。 |
 | `RATE_LIMIT_ENABLED` | `true` | IP 単位のトークンバケットを有効化。 |

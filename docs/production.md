@@ -45,3 +45,5 @@ The application binds the host port to localhost, runs as a non-root user with a
 ## Remaining commercial boundary
 
 The payment provider is explicitly a simulator. It performs no real settlement. Real payment rollout needs provider-specific signing, idempotent external intent creation outside long database transactions, callback retry policy, reconciliation and refund flows. No MQ, cron platform or unused external-client abstraction is introduced without a business requirement.
+
+Refresh checks the stored session expiry after acquiring its PostgreSQL row lock. A session that expires while waiting cannot rotate. HTTP refresh clears the cookie only for invalid credentials or a disabled account; internal failures, timeouts and cancellation preserve it for retry, although a response lost after a committed rotation can still require login. Standard HTTP method labels remain unchanged; extension methods share `OTHER` to bound Prometheus series growth.

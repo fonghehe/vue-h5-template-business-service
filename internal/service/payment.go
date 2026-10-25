@@ -137,6 +137,9 @@ func (s *PaymentService) Create(ctx context.Context, userID, orderID uint) (mode
 			return apierr.Conflict("order has expired")
 		}
 		if existing, findErr := tx.FindPaymentByOrder(ctx, order.ID); findErr == nil {
+			if existing.Provider != s.provider.Name() {
+				return apierr.Conflict("payment belongs to a different provider")
+			}
 			payment = existing
 			return nil
 		} else if !repository.IsNotFound(findErr) {
@@ -176,6 +179,9 @@ func (s *PaymentService) HandleWebhook(ctx context.Context, callback PaymentCall
 		}
 		now := s.now().UTC()
 
+		if payment.Provider != s.provider.Name() {
+			return apierr.Conflict("payment belongs to a different provider")
+		}
 		if payment.OrderID != order.ID || payment.Reference != callback.Reference {
 			return apierr.Conflict("payment reference does not belong to the order")
 		}

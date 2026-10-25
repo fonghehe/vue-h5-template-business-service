@@ -45,3 +45,5 @@ docker compose -f compose.production.yml up -d business
 ## 商业能力边界
 
 支付提供方明确是模拟器，不会进行真实资金结算。真实支付上线仍需渠道验签、避免在长数据库事务中调用外部平台的幂等支付创建、回调重试策略、对账和退款流程。没有业务需求时不引入 MQ、Cron 平台或闲置外部 Client 抽象。
+
+刷新会在取得 PostgreSQL 会话行锁后重新检查有效期，等待期间过期的会话不能轮换。HTTP 刷新仅在凭证无效或账号禁用时清除 cookie；内部故障、超时与取消保留 cookie 以便重试，但轮换已提交后丢失响应仍可能要求重新登录。标准 HTTP method 指标标签不变，自定义 method 统一为 `OTHER`，限制 Prometheus 时间序列增长。

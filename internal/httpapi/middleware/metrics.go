@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
@@ -17,7 +18,16 @@ func Prometheus(m *metrics.Metrics) gin.HandlerFunc {
 		if route == "" {
 			route = "unmatched"
 		}
-		m.HTTPRequests.WithLabelValues(c.Request.Method, route, strconv.Itoa(c.Writer.Status())).Inc()
-		m.HTTPRequestDuration.WithLabelValues(c.Request.Method, route).Observe(time.Since(started).Seconds())
+		method := c.Request.Method
+		// Extension methods are valid HTTP, but must not create unbounded
+		// metric children on unauthenticated/unmatched requests.
+		switch method {
+		case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+			http.MethodPatch, http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		default:
+			method = "OTHER"
+		}
+		m.HTTPRequests.WithLabelValues(method, route, strconv.Itoa(c.Writer.Status())).Inc()
+		m.HTTPRequestDuration.WithLabelValues(method, route).Observe(time.Since(started).Seconds())
 	}
 }

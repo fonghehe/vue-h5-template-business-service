@@ -27,7 +27,7 @@ There is no `.env.development` or `.env.production` loader. Copy `.env.example` 
 | `JWT_AUDIENCE` | `vue-h5-template-api` | `aud` claim; must match the AI service. |
 | `ACCESS_TOKEN_TTL` | `2h` | Access token lifetime. |
 | `REFRESH_TOKEN_TTL` | `336h` | Refresh token lifetime (must exceed `ACCESS_TOKEN_TTL`). |
-| `REFRESH_COOKIE_NAME` | `vh5_refresh` | HttpOnly cookie carrying the refresh token. |
+| `REFRESH_COOKIE_NAME` | `vh5_refresh` | HttpOnly cookie carrying the refresh token; its name must pass Go net/http validation or startup fails. |
 | `REFRESH_COOKIE_SECURE` | `false` outside staging/production, `true` in staging/production | Mark the refresh cookie `Secure`. |
 | `CORS_ORIGINS` | `http://localhost:5173,…` | Comma-separated browser origin allow-list. |
 | `RATE_LIMIT_ENABLED` | `true` | Turn the per-IP token bucket on. |

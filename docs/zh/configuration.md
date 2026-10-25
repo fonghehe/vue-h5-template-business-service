@@ -26,7 +26,7 @@
 | `JWT_AUDIENCE` | `vue-h5-template-api` | `aud` 声明；必须与 AI 服务一致。 |
 | `ACCESS_TOKEN_TTL` | `2h` | 访问令牌有效期。 |
 | `REFRESH_TOKEN_TTL` | `336h` | 刷新令牌有效期（必须大于 `ACCESS_TOKEN_TTL`）。 |
-| `REFRESH_COOKIE_NAME` | `vh5_refresh` | 承载刷新令牌的 HttpOnly cookie。 |
+| `REFRESH_COOKIE_NAME` | `vh5_refresh` | 承载刷新令牌的 HttpOnly cookie；名称须通过 Go net/http 校验，否则启动失败。 |
 | `REFRESH_COOKIE_SECURE` | 非生产 `false`，生产 `true` | 标记刷新 cookie 为 `Secure`。 |
 | `CORS_ORIGINS` | `http://localhost:5173,…` | 逗号分隔的浏览器源白名单。 |
 | `RATE_LIMIT_ENABLED` | `true` | 开启按 IP 令牌桶限流。 |

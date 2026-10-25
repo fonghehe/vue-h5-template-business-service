@@ -289,7 +289,11 @@ func (r *CommerceRepository) UpdateCouponUsage(ctx context.Context, orderID uint
 }
 
 func preloadOrder(db *gorm.DB) *gorm.DB {
-	return db.Preload("Items").Preload("StatusHistory", func(tx *gorm.DB) *gorm.DB {
+	// Payment, cancellation and checkout must acquire inventory locks in the
+	// same SKU order; SQL row order is otherwise unspecified.
+	return db.Preload("Items", func(tx *gorm.DB) *gorm.DB {
+		return tx.Order("sku_id ASC, id ASC")
+	}).Preload("StatusHistory", func(tx *gorm.DB) *gorm.DB {
 		return tx.Order("id ASC")
 	})
 }

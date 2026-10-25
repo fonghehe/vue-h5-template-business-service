@@ -77,3 +77,5 @@ Favorites count and paginate the joined, non-deleted product relation in SQL, th
 Configuration validation finishes before resources open. Failed schema or seed initialization closes the database pool. Readiness uses the request context with a three-second limit, including pool waits. Internal error causes join the private access log with the request ID; public responses retain the safe error envelope.
 
 Refresh consumes a PostgreSQL session once and rotates it atomically; logout revokes the current refresh session. Access JWTs remain valid until expiry and clients must discard them. Current account status/roles are loaded on each authenticated business request. Existing refresh JWTs issued before this upgrade require login again.
+
+Payment creation replays an existing record only when its provider matches the configured adapter. Webhooks enforce the same provider ownership before recording an event or changing order, stock or coupon state. All order item loads explicitly sort by SKU ID so payment and cancellation acquire inventory locks in the same order as checkout and expiration, including historical/imported snapshots.

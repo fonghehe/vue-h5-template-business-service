@@ -61,7 +61,12 @@ func (s *Server) refresh(c *gin.Context) {
 
 	result, pair, err := s.auth.Refresh(c.Request.Context(), token)
 	if err != nil {
-		middleware.ClearRefreshCookie(c, s.config)
+		// A storage outage, timeout or disconnect does not invalidate the
+		// session. Preserve the cookie so the browser can retry after recovery.
+		if appErr := apierr.FromError(err); appErr != nil &&
+			(appErr.Code == apierr.CodeUnauthorized || appErr.Code == apierr.CodeForbidden) {
+			middleware.ClearRefreshCookie(c, s.config)
+		}
 		response.Fail(c, err)
 		return
 	}

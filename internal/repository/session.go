@@ -2,11 +2,13 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/fonghehe/vue-h5-template-business-service/internal/apierr"
 	"github.com/fonghehe/vue-h5-template-business-service/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func (r *UserRepository) CreateSession(ctx context.Context, session model.RefreshSession) error {
@@ -18,10 +20,25 @@ func (r *UserRepository) CreateSession(ctx context.Context, session model.Refres
 }
 
 // RotateSession consumes one valid token and persists its replacement atomically.
-// Concurrent consumers wait on the DELETE lock; exactly one can delete the row.
+// Concurrent consumers wait on the session lock; exactly one can delete the
+// row. Check expiry after acquiring it, as a lock wait can outlive the token.
 func (r *UserRepository) RotateSession(ctx context.Context, hash string, next model.RefreshSession) error {
 	next.ExpiresAt = next.ExpiresAt.UTC()
 	return WrapTransaction(r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current model.RefreshSession
+		query := tx.Where("token_hash = ? AND user_id = ?", hash, next.UserID)
+		if tx.Name() == "postgres" {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		if err := query.First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return apierr.Unauthorized("invalid or expired refresh session")
+			}
+			return err
+		}
+		if !current.ExpiresAt.After(time.Now().UTC()) {
+			return apierr.Unauthorized("invalid or expired refresh session")
+		}
 		result := tx.Where("token_hash = ? AND user_id = ? AND expires_at > ?", hash, next.UserID, time.Now().UTC()).Delete(&model.RefreshSession{})
 		if result.Error != nil {
 			return result.Error
